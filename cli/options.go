@@ -17,11 +17,14 @@
 package cli
 
 import (
-	"fmt"
-	"io/ioutil"
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 
 	"github.com/compose-spec/compose-go/consts"
 	"github.com/compose-spec/compose-go/dotenv"
@@ -29,17 +32,52 @@ import (
 	"github.com/compose-spec/compose-go/loader"
 	"github.com/compose-spec/compose-go/types"
 	"github.com/compose-spec/compose-go/utils"
-	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
 
-// ProjectOptions groups the command line options recommended for a Compose implementation
+// ProjectOptions provides common configuration for loading a project.
 type ProjectOptions struct {
-	Name        string
-	WorkingDir  string
+	ctx context.Context
+
+	// Name is a valid Compose project name to be used or empty.
+	//
+	// If empty, the project loader will automatically infer a reasonable
+	// project name if possible.
+	Name string
+
+	// WorkingDir is a file path to use as the project directory or empty.
+	//
+	// If empty, the project loader will automatically infer a reasonable
+	// working directory if possible.
+	WorkingDir string
+
+	// ConfigPaths are file paths to one or more Compose files.
+	//
+	// These are applied in order by the loader following the merge logic
+	// as described in the spec.
+	//
+	// The first entry is required and is the primary Compose file.
+	// For convenience, WithConfigFileEnv and WithDefaultConfigPath
+	// are provided to populate this in a predictable manner.
 	ConfigPaths []string
-	Environment map[string]string
-	EnvFile     string
+
+	// Environment are additional environment variables to make available
+	// for interpolation.
+	//
+	// NOTE: For security, the loader does not automatically expose any
+	// process environment variables. For convenience, WithOsEnv can be
+	// used if appropriate.
+	Environment types.Mapping
+
+	// EnvFiles are file paths to ".env" files with additional environment
+	// variable data.
+	//
+	// These are loaded in-order, so it is possible to override variables or
+	// in subsequent files.
+	//
+	// This field is optional, but any file paths that are included here must
+	// exist or an error will be returned during load.
+	EnvFiles []string
+
 	loadOptions []func(*loader.Options)
 }
 
@@ -63,8 +101,12 @@ func NewProjectOptions(configs []string, opts ...ProjectOptionsFn) (*ProjectOpti
 // WithName defines ProjectOptions' name
 func WithName(name string) ProjectOptionsFn {
 	return func(o *ProjectOptions) error {
+		// a project (once loaded) cannot have an empty name
+		// however, on the options object, the name is optional: if unset,
+		// a name will be inferred by the loader, so it's legal to set the
+		// name to an empty string here
 		if name != loader.NormalizeProjectName(name) {
-			return fmt.Errorf("%q is not a valid project name", name)
+			return loader.InvalidProjectNameErr(name)
 		}
 		o.Name = name
 		return nil
@@ -145,14 +187,14 @@ func WithDefaultConfigPath(o *ProjectOptions) error {
 // WithEnv defines a key=value set of variables used for compose file interpolation
 func WithEnv(env []string) ProjectOptionsFn {
 	return func(o *ProjectOptions) error {
-		for k, v := range getAsEqualsMap(env) {
+		for k, v := range utils.GetAsEqualsMap(env) {
 			o.Environment[k] = v
 		}
 		return nil
 	}
 }
 
-// WithDiscardEnvFiles sets discards the `env_file` section after resolving to
+// WithDiscardEnvFile sets discards the `env_file` section after resolving to
 // the `environment` section
 func WithDiscardEnvFile(o *ProjectOptions) error {
 	o.loadOptions = append(o.loadOptions, loader.WithDiscardEnvFiles)
@@ -167,80 +209,64 @@ func WithLoadOptions(loadOptions ...func(*loader.Options)) ProjectOptionsFn {
 	}
 }
 
+// WithDefaultProfiles uses the provided profiles (if any), and falls back to
+// profiles specified via the COMPOSE_PROFILES environment variable otherwise.
+func WithDefaultProfiles(profile ...string) ProjectOptionsFn {
+	if len(profile) == 0 {
+		profile = strings.Split(os.Getenv(consts.ComposeProfiles), ",")
+	}
+	return WithProfiles(profile)
+}
+
+// WithProfiles sets profiles to be activated
+func WithProfiles(profiles []string) ProjectOptionsFn {
+	return func(o *ProjectOptions) error {
+		o.loadOptions = append(o.loadOptions, loader.WithProfiles(profiles))
+		return nil
+	}
+}
+
 // WithOsEnv imports environment variables from OS
 func WithOsEnv(o *ProjectOptions) error {
-	for k, v := range getAsEqualsMap(os.Environ()) {
+	for k, v := range utils.GetAsEqualsMap(os.Environ()) {
+		if _, set := o.Environment[k]; set {
+			continue
+		}
 		o.Environment[k] = v
 	}
 	return nil
 }
 
-// WithEnvFile set an alternate env file
+// WithEnvFile sets an alternate env file.
+//
+// Deprecated: use WithEnvFiles instead.
 func WithEnvFile(file string) ProjectOptionsFn {
+	var files []string
+	if file != "" {
+		files = []string{file}
+	}
+	return WithEnvFiles(files...)
+}
+
+// WithEnvFiles set alternate env files
+func WithEnvFiles(file ...string) ProjectOptionsFn {
 	return func(options *ProjectOptions) error {
-		options.EnvFile = file
+		options.EnvFiles = file
 		return nil
 	}
 }
 
 // WithDotEnv imports environment variables from .env file
 func WithDotEnv(o *ProjectOptions) error {
-	dotEnvFile := o.EnvFile
-	if dotEnvFile == "" {
-		wd, err := o.GetWorkingDir()
-		if err != nil {
-			return err
-		}
-		dotEnvFile = filepath.Join(wd, ".env")
-	}
-	abs, err := filepath.Abs(dotEnvFile)
+	wd, err := o.GetWorkingDir()
 	if err != nil {
 		return err
 	}
-	dotEnvFile = abs
-
-	s, err := os.Stat(dotEnvFile)
-	if os.IsNotExist(err) {
-		if o.EnvFile != "" {
-			return errors.Errorf("Couldn't find env file: %s", o.EnvFile)
-		}
-		return nil
-	}
+	envMap, err := dotenv.GetEnvFromFile(o.Environment, wd, o.EnvFiles)
 	if err != nil {
 		return err
 	}
-
-	if s.IsDir() {
-		if o.EnvFile == "" {
-			return nil
-		}
-		return errors.Errorf("%s is a directory", dotEnvFile)
-	}
-
-	file, err := os.Open(dotEnvFile)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	notInEnvSet := make(map[string]interface{})
-	env, err := dotenv.ParseWithLookup(file, func(k string) (string, bool) {
-		v, ok := o.Environment[k]
-		if !ok {
-			notInEnvSet[k] = nil
-			return "", true
-		}
-		return v, true
-	})
-	if err != nil {
-		return err
-	}
-	for k, v := range env {
-		if _, ok := notInEnvSet[k]; ok {
-			continue
-		}
-		o.Environment[k] = v
-	}
+	o.Environment.Merge(envMap)
 	return nil
 }
 
@@ -264,6 +290,16 @@ func WithNormalization(normalization bool) ProjectOptionsFn {
 	}
 }
 
+// WithConsistency set ProjectOptions to enable/skip consistency
+func WithConsistency(consistency bool) ProjectOptionsFn {
+	return func(o *ProjectOptions) error {
+		o.loadOptions = append(o.loadOptions, func(options *loader.Options) {
+			options.SkipConsistencyCheck = !consistency
+		})
+		return nil
+	}
+}
+
 // WithResolvedPaths set ProjectOptions to enable paths resolution
 func WithResolvedPaths(resolve bool) ProjectOptionsFn {
 	return func(o *ProjectOptions) error {
@@ -272,6 +308,32 @@ func WithResolvedPaths(resolve bool) ProjectOptionsFn {
 		})
 		return nil
 	}
+}
+
+// WithContext sets the context used to load model and resources
+func WithContext(ctx context.Context) ProjectOptionsFn {
+	return func(o *ProjectOptions) error {
+		o.ctx = ctx
+		return nil
+	}
+}
+
+// WithResourceLoader register support for ResourceLoader to manage remote resources
+func WithResourceLoader(r loader.ResourceLoader) ProjectOptionsFn {
+	return func(o *ProjectOptions) error {
+		o.loadOptions = append(o.loadOptions, func(options *loader.Options) {
+			options.ResourceLoaders = append(options.ResourceLoaders, r)
+		})
+		return nil
+	}
+}
+
+// WithoutEnvironmentResolution disable environment resolution
+func WithoutEnvironmentResolution(o *ProjectOptions) error {
+	o.loadOptions = append(o.loadOptions, func(options *loader.Options) {
+		options.SkipResolveEnvironment = true
+	})
+	return nil
 }
 
 // DefaultFileNames defines the Compose file names for auto-discovery (in order of preference)
@@ -307,7 +369,7 @@ func ProjectFromOptions(options *ProjectOptions) (*types.Project, error) {
 	for _, f := range configPaths {
 		var b []byte
 		if f == "-" {
-			b, err = ioutil.ReadAll(os.Stdin)
+			b, err = io.ReadAll(os.Stdin)
 			if err != nil {
 				return nil, err
 			}
@@ -316,7 +378,7 @@ func ProjectFromOptions(options *ProjectOptions) (*types.Project, error) {
 			if err != nil {
 				return nil, err
 			}
-			b, err = ioutil.ReadFile(f)
+			b, err = os.ReadFile(f)
 			if err != nil {
 				return nil, err
 			}
@@ -340,7 +402,12 @@ func ProjectFromOptions(options *ProjectOptions) (*types.Project, error) {
 		withNamePrecedenceLoad(absWorkingDir, options),
 		withConvertWindowsPaths(options))
 
-	project, err := loader.Load(types.ConfigDetails{
+	ctx := options.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	project, err := loader.LoadWithContext(ctx, types.ConfigDetails{
 		ConfigFiles: configs,
 		WorkingDir:  workingDir,
 		Environment: options.Environment,
@@ -360,15 +427,19 @@ func withNamePrecedenceLoad(absWorkingDir string, options *ProjectOptions) func(
 		} else if nameFromEnv, ok := options.Environment[consts.ComposeProjectName]; ok && nameFromEnv != "" {
 			opts.SetProjectName(nameFromEnv, true)
 		} else {
-			opts.SetProjectName(filepath.Base(absWorkingDir), false)
+			opts.SetProjectName(
+				loader.NormalizeProjectName(filepath.Base(absWorkingDir)),
+				false,
+			)
 		}
 	}
 }
 
 func withConvertWindowsPaths(options *ProjectOptions) func(*loader.Options) {
 	return func(o *loader.Options) {
-		o.ConvertWindowsPaths = utils.StringToBool(options.Environment["COMPOSE_CONVERT_WINDOWS_PATHS"])
-		o.ResolvePaths = true
+		if o.ResolvePaths {
+			o.ConvertWindowsPaths = utils.StringToBool(options.Environment["COMPOSE_CONVERT_WINDOWS_PATHS"])
+		}
 	}
 }
 
@@ -409,23 +480,4 @@ func absolutePaths(p []string) ([]string, error) {
 		paths = append(paths, f)
 	}
 	return paths, nil
-}
-
-// getAsEqualsMap split key=value formatted strings into a key : value map
-func getAsEqualsMap(em []string) map[string]string {
-	m := make(map[string]string)
-	for _, v := range em {
-		kv := strings.SplitN(v, "=", 2)
-		m[kv[0]] = kv[1]
-	}
-	return m
-}
-
-// getAsEqualsMap format a key : value map into key=value strings
-func getAsStringList(em map[string]string) []string {
-	m := make([]string, 0, len(em))
-	for k, v := range em {
-		m = append(m, fmt.Sprintf("%s=%s", k, v))
-	}
-	return m
 }

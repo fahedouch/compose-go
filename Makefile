@@ -32,13 +32,22 @@ build-validate-image:
 
 .PHONY: lint
 lint: build-validate-image
-	docker run --rm $(IMAGE_PREFIX)validate bash -c "golangci-lint run --config ./golangci.yml ./..."
+	docker run --rm $(IMAGE_PREFIX)validate bash -c "golangci-lint run --config ./.golangci.yml ./..."
 
 .PHONY: check-license
 check-license: build-validate-image
 	docker run --rm $(IMAGE_PREFIX)validate bash -c "./scripts/validate/fileheader"
 
+.PHONY: check-schema
+check-schema:
+	curl -fSL -o schema/compose-spec.json https://raw.githubusercontent.com/compose-spec/compose-spec/master/schema/compose-spec.json
+	git diff --exit-code schema/compose-spec.json
+
 .PHONY: setup
 setup: ## Setup the precommit hook
 	@which pre-commit > /dev/null 2>&1 || (echo "pre-commit not installed see README." && false)
 	@pre-commit install
+
+.PHONY: sync
+sync:
+	curl -fSL https://raw.githubusercontent.com/compose-spec/compose-spec/master/schema/compose-spec.json -o schema/compose-spec.json

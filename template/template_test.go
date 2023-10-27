@@ -47,10 +47,24 @@ func TestSubstituteNoMatch(t *testing.T) {
 	assert.Equal(t, "foo", result)
 }
 
+func TestUnescaped(t *testing.T) {
+	templates := []string{
+		"a $ string",
+		"^REGEX$",
+		"$}",
+		"$",
+	}
+
+	for _, expected := range templates {
+		actual, err := Substitute(expected, defaultMapping)
+		assert.NilError(t, err)
+		assert.Equal(t, expected, actual)
+	}
+}
+
 func TestInvalid(t *testing.T) {
 	invalidTemplates := []string{
 		"${",
-		"$}",
 		"${}",
 		"${ }",
 		"${ foo}",
@@ -113,10 +127,103 @@ func TestEmptyValueWithHardDefault(t *testing.T) {
 	assert.Check(t, is.Equal("ok ", result))
 }
 
+func TestPresentValueWithUnset(t *testing.T) {
+	result, err := Substitute("ok ${UNSET_VAR:+presence_value}", defaultMapping)
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal("ok ", result))
+}
+
+func TestPresentValueWithUnset2(t *testing.T) {
+	result, err := Substitute("ok ${UNSET_VAR+presence_value}", defaultMapping)
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal("ok ", result))
+}
+
+func TestPresentValueWithNonEmpty(t *testing.T) {
+	result, err := Substitute("ok ${FOO:+presence_value}", defaultMapping)
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal("ok presence_value", result))
+}
+
+func TestPresentValueAndNonEmptyWithNonEmpty(t *testing.T) {
+	result, err := Substitute("ok ${FOO+presence_value}", defaultMapping)
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal("ok presence_value", result))
+}
+
+func TestPresentValueWithSet(t *testing.T) {
+	result, err := Substitute("ok ${BAR+presence_value}", defaultMapping)
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal("ok presence_value", result))
+}
+
+func TestPresentValueAndNotEmptyWithSet(t *testing.T) {
+	result, err := Substitute("ok ${BAR:+presence_value}", defaultMapping)
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal("ok ", result))
+}
+
 func TestNonAlphanumericDefault(t *testing.T) {
 	result, err := Substitute("ok ${BAR:-/non:-alphanumeric}", defaultMapping)
 	assert.NilError(t, err)
 	assert.Check(t, is.Equal("ok /non:-alphanumeric", result))
+}
+
+func TestInterpolationExternalInterference(t *testing.T) {
+	testCases := []struct {
+		name     string
+		template string
+		expected string
+	}{
+		{
+			template: "-ok ${BAR:-defaultValue}",
+			expected: "-ok defaultValue",
+		},
+		{
+			template: "+ok ${UNSET:-${BAR-defaultValue}}",
+			expected: "+ok ",
+		},
+		{
+			template: "-ok ${FOO:-defaultValue}",
+			expected: "-ok first",
+		},
+		{
+			template: ":-ok ${UNSET-defaultValue}",
+			expected: ":-ok defaultValue",
+		},
+		{
+			template: ":-ok ${BAR-defaultValue}",
+			expected: ":-ok ",
+		},
+		{
+			template: ":?ok ${BAR-defaultValue}",
+			expected: ":?ok ",
+		},
+		{
+			template: ":?ok ${BAR:-defaultValue}",
+			expected: ":?ok defaultValue",
+		},
+		{
+			template: ":+ok ${BAR:-defaultValue}",
+			expected: ":+ok defaultValue",
+		},
+		{
+			template: "+ok ${BAR-defaultValue}",
+			expected: "+ok ",
+		},
+		{
+			template: "?ok ${BAR:-defaultValue}",
+			expected: "?ok defaultValue",
+		},
+	}
+	for i, tc := range testCases {
+		tc := tc
+		t.Run(fmt.Sprintf("Interpolation Should not be impacted by outer text: %d", i), func(t *testing.T) {
+			result, err := Substitute(tc.template, defaultMapping)
+			assert.NilError(t, err)
+			assert.Check(t, is.Equal(tc.expected, result))
+		})
+	}
 }
 
 func TestDefaultsWithNestedExpansion(t *testing.T) {
@@ -147,6 +254,14 @@ func TestDefaultsWithNestedExpansion(t *testing.T) {
 		{
 			template: "ok ${BAR:-${FOO} ${FOO}}",
 			expected: "ok first first",
+		},
+		{
+			template: "ok ${BAR+$FOO}",
+			expected: "ok first",
+		},
+		{
+			template: "ok ${BAR+$FOO ${FOO:+second}}",
+			expected: "ok first second",
 		},
 	}
 
@@ -187,7 +302,7 @@ func TestMandatoryVariableErrors(t *testing.T) {
 	for _, tc := range testCases {
 		_, err := Substitute(tc.template, defaultMapping)
 		assert.ErrorContains(t, err, tc.expectedError)
-		assert.ErrorType(t, err, reflect.TypeOf(&InvalidTemplateError{}))
+		assert.ErrorType(t, err, reflect.TypeOf(&MissingRequiredError{}))
 	}
 }
 
@@ -209,7 +324,7 @@ func TestMandatoryVariableErrorsWithNestedExpansion(t *testing.T) {
 	for _, tc := range testCases {
 		_, err := Substitute(tc.template, defaultMapping)
 		assert.ErrorContains(t, err, tc.expectedError)
-		assert.ErrorType(t, err, reflect.TypeOf(&InvalidTemplateError{}))
+		assert.ErrorType(t, err, reflect.TypeOf(&MissingRequiredError{}))
 	}
 }
 
@@ -262,9 +377,66 @@ func TestSubstituteWithCustomFunc(t *testing.T) {
 	assert.Check(t, is.ErrorContains(err, "required variable"))
 }
 
+func TestSubstituteWithReplacementFunc(t *testing.T) {
+	options := []Option{
+		WithReplacementFunction(func(s string, m Mapping, c *Config) (string, error) {
+			if s == "${NOTHERE}" {
+				return "", fmt.Errorf("bad choice: %q", s)
+			}
+			r, err := DefaultReplacementFunc(s, m, c)
+			if err == nil && r != "" {
+				return r, nil
+			}
+			return "foobar", nil
+		}),
+	}
+	result, err := SubstituteWithOptions("ok ${FOO}", defaultMapping, options...)
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal("ok first", result))
+
+	result, err = SubstituteWithOptions("ok ${BAR}", defaultMapping, options...)
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal("ok foobar", result))
+
+	result, err = SubstituteWithOptions("ok ${UNSET}", defaultMapping, options...)
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal("ok foobar", result))
+
+	_, err = SubstituteWithOptions("ok ${NOTHERE}", defaultMapping, options...)
+	assert.Check(t, is.ErrorContains(err, "bad choice"))
+}
+
+func TestSubstituteWithReplacementAppliedFunc(t *testing.T) {
+	options := []Option{
+		WithReplacementFunction(func(s string, m Mapping, c *Config) (string, error) {
+			if s == "${NOTHERE}" {
+				return "", fmt.Errorf("bad choice: %q", s)
+			}
+			r, applied, err := DefaultReplacementAppliedFunc(s, m, c)
+			if err == nil && applied {
+				return r, nil
+			}
+			return "foobar", nil
+		}),
+	}
+	result, err := SubstituteWithOptions("ok ${FOO}", defaultMapping, options...)
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal("ok first", result))
+
+	result, err = SubstituteWithOptions("ok ${BAR}", defaultMapping, options...)
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal("ok ", result))
+
+	result, err = SubstituteWithOptions("ok ${UNSET}", defaultMapping, options...)
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal("ok foobar", result))
+
+	_, err = SubstituteWithOptions("ok ${NOTHERE}", defaultMapping, options...)
+	assert.Check(t, is.ErrorContains(err, "bad choice"))
+}
+
 // TestPrecedence tests is the precedence on '-' and '?' is of the first match
 func TestPrecedence(t *testing.T) {
-
 	testCases := []struct {
 		template string
 		expected string
@@ -273,8 +445,9 @@ func TestPrecedence(t *testing.T) {
 		{
 			template: "${UNSET_VAR?bar-baz}", // Unexistent variable
 			expected: "",
-			err: &InvalidTemplateError{
-				Template: "required variable UNSET_VAR is missing a value: bar-baz",
+			err: &MissingRequiredError{
+				Variable: "UNSET_VAR",
+				Reason:   "bar-baz",
 			},
 		},
 		{
@@ -398,12 +571,62 @@ func TestExtractVariables(t *testing.T) {
 				"project": {Name: "project", DefaultValue: "cli"},
 			},
 		},
+		{
+			name: "presence-value-nonEmpty",
+			dict: map[string]interface{}{
+				"foo": "${bar:+foo}",
+			},
+			expected: map[string]Variable{
+				"bar": {Name: "bar", PresenceValue: "foo"},
+			},
+		},
+		{
+			name: "presence-value",
+			dict: map[string]interface{}{
+				"foo": "${bar+foo}",
+			},
+			expected: map[string]Variable{
+				"bar": {Name: "bar", PresenceValue: "foo"},
+			},
+		},
 	}
 	for _, tc := range testCases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			actual := ExtractVariables(tc.dict, defaultPattern)
 			assert.Check(t, is.DeepEqual(actual, tc.expected))
+		})
+	}
+}
+
+func TestSubstitutionFunctionChoice(t *testing.T) {
+	testcases := []struct {
+		name   string
+		input  string
+		symbol string
+	}{
+		{"Error when EMPTY or UNSET", "VARNAME:?val?ue", ":?"},
+		{"Error when UNSET 1", "VARNAME?val:?ue", "?"},
+		{"Error when UNSET 2", "VARNAME?va-lu+e:?e", "?"},
+		{"Error when UNSET 3", "VARNAME?va+lu-e:?e", "?"},
+
+		{"Default when EMPTY or UNSET", "VARNAME:-value", ":-"},
+		{"Default when UNSET 1", "VARNAME-va:-lu:?e", "-"},
+		{"Default when UNSET 2", "VARNAME-va+lu?e", "-"},
+		{"Default when UNSET 3", "VARNAME-va?lu+e", "-"},
+
+		{"Default when NOT EMPTY", "VARNAME:+va:?lu:-e", ":+"},
+		{"Default when SET 1", "VARNAME+va:+lue", "+"},
+		{"Default when SET 2", "VARNAME+va?lu-e", "+"},
+		{"Default when SET 3", "VARNAME+va-lu?e", "+"},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			symbol, _ := getSubstitutionFunctionForTemplate(tc.input)
+			assert.Equal(t, symbol, tc.symbol,
+				fmt.Sprintf("Wrong on output for: %s got symbol -> %#v", tc.input, symbol),
+			)
 		})
 	}
 }

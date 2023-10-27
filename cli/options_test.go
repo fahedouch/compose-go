@@ -22,8 +22,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/compose-spec/compose-go/consts"
+	"github.com/compose-spec/compose-go/types"
 	"gotest.tools/v3/assert"
+
+	"github.com/compose-spec/compose-go/consts"
+	"github.com/compose-spec/compose-go/utils"
 )
 
 func TestProjectName(t *testing.T) {
@@ -51,56 +54,91 @@ func TestProjectName(t *testing.T) {
 		assert.Equal(t, p.Name, "42my_project_env")
 	})
 
+	t.Run("by name empty", func(t *testing.T) {
+		opts, err := NewProjectOptions(
+			[]string{"testdata/simple/compose.yaml"},
+			WithName(""),
+		)
+		assert.NilError(t, err)
+		p, err := ProjectFromOptions(opts)
+		assert.NilError(t, err)
+		assert.Equal(t, p.Name, "simple")
+	})
+
+	t.Run("by name empty working dir", func(t *testing.T) {
+		opts, err := NewProjectOptions(
+			[]string{"testdata/simple/compose.yaml"},
+			WithName(""),
+			WithWorkingDirectory("/path/to/proj"),
+		)
+		assert.NilError(t, err)
+		p, err := ProjectFromOptions(opts)
+		assert.NilError(t, err)
+		assert.Equal(t, p.Name, "proj")
+	})
+
+	t.Run("by name must not come from root directory", func(t *testing.T) {
+		opts, err := NewProjectOptions([]string{"testdata/simple/compose.yaml"},
+			WithWorkingDirectory("/"))
+		assert.NilError(t, err)
+		p, err := ProjectFromOptions(opts)
+
+		// root directory will resolve to an empty project name since there
+		// IS no directory name!
+		assert.ErrorContains(t, err, `project name must not be empty`)
+		assert.Assert(t, p == nil)
+	})
+
 	t.Run("by name start with invalid char '-'", func(t *testing.T) {
 		_, err := NewProjectOptions([]string{"testdata/simple/compose.yaml"}, WithName("-my_project"))
-		assert.Error(t, err, `"-my_project" is not a valid project name`)
+		assert.ErrorContains(t, err, `invalid project name "-my_project"`)
 
 		opts, err := NewProjectOptions([]string{"testdata/simple/compose.yaml"}, WithEnv([]string{
 			fmt.Sprintf("%s=%s", consts.ComposeProjectName, "-my_project"),
 		}))
 		assert.NilError(t, err)
 		p, err := ProjectFromOptions(opts)
-		assert.NilError(t, err)
-		assert.Equal(t, p.Name, "my_project")
+		assert.ErrorContains(t, err, `invalid project name "-my_project"`)
+		assert.Assert(t, p == nil)
 	})
 
 	t.Run("by name start with invalid char '_'", func(t *testing.T) {
 		_, err := NewProjectOptions([]string{"testdata/simple/compose.yaml"}, WithName("_my_project"))
-		assert.Error(t, err, `"_my_project" is not a valid project name`)
+		assert.ErrorContains(t, err, `invalid project name "_my_project"`)
 
 		opts, err := NewProjectOptions([]string{"testdata/simple/compose.yaml"}, WithEnv([]string{
 			fmt.Sprintf("%s=%s", consts.ComposeProjectName, "_my_project"),
 		}))
 		assert.NilError(t, err)
 		p, err := ProjectFromOptions(opts)
-		assert.NilError(t, err)
-		assert.Equal(t, p.Name, "my_project")
+		assert.ErrorContains(t, err, `invalid project name "_my_project"`)
+		assert.Assert(t, p == nil)
 	})
 
 	t.Run("by name contains dots", func(t *testing.T) {
 		_, err := NewProjectOptions([]string{"testdata/simple/compose.yaml"}, WithName("www.my.project"))
-		assert.Error(t, err, `"www.my.project" is not a valid project name`)
+		assert.ErrorContains(t, err, `invalid project name "www.my.project"`)
 
 		opts, err := NewProjectOptions([]string{"testdata/simple/compose.yaml"}, WithEnv([]string{
 			fmt.Sprintf("%s=%s", consts.ComposeProjectName, "www.my.project"),
 		}))
 		assert.NilError(t, err)
 		p, err := ProjectFromOptions(opts)
-		assert.NilError(t, err)
-		assert.Equal(t, p.Name, "wwwmyproject")
+		assert.ErrorContains(t, err, `invalid project name "www.my.project"`)
+		assert.Assert(t, p == nil)
 	})
 
 	t.Run("by name uppercase", func(t *testing.T) {
 		_, err := NewProjectOptions([]string{"testdata/simple/compose.yaml"}, WithName("MY_PROJECT"))
-		assert.Error(t, err, `"MY_PROJECT" is not a valid project name`)
+		assert.ErrorContains(t, err, `invalid project name "MY_PROJECT"`)
 
 		opts, err := NewProjectOptions([]string{"testdata/simple/compose.yaml"}, WithEnv([]string{
-			fmt.Sprintf("%s=%s", consts.ComposeProjectName, "_my_project"),
+			fmt.Sprintf("%s=%s", consts.ComposeProjectName, "MY_PROJECT"),
 		}))
 		assert.NilError(t, err)
 		p, err := ProjectFromOptions(opts)
-		assert.NilError(t, err)
-		assert.Equal(t, p.Name, "my_project")
+		assert.ErrorContains(t, err, `invalid project name "MY_PROJECT"`)
+		assert.Assert(t, p == nil)
 	})
 
 	t.Run("by working dir", func(t *testing.T) {
@@ -117,6 +155,14 @@ func TestProjectName(t *testing.T) {
 		p, err := ProjectFromOptions(opts)
 		assert.NilError(t, err)
 		assert.Equal(t, p.Name, "simple")
+	})
+
+	t.Run("by compose file parent dir special", func(t *testing.T) {
+		opts, err := NewProjectOptions([]string{"testdata/UNNORMALIZED PATH/compose.yaml"})
+		assert.NilError(t, err)
+		p, err := ProjectFromOptions(opts)
+		assert.NilError(t, err)
+		assert.Equal(t, p.Name, "unnormalizedpath")
 	})
 
 	t.Run("by COMPOSE_PROJECT_NAME", func(t *testing.T) {
@@ -143,6 +189,15 @@ func TestProjectName(t *testing.T) {
 		assert.Equal(t, p.Name, "my_project_from_dot_env")
 	})
 
+	t.Run("by name in compose.yaml with variable", func(t *testing.T) {
+		opts, err := NewProjectOptions([]string{"testdata/simple/compose-name.yaml"}, WithEnv([]string{
+			"TEST=expected",
+		}))
+		assert.NilError(t, err)
+		p, err := ProjectFromOptions(opts)
+		assert.NilError(t, err)
+		assert.Equal(t, p.Name, "test-expected-test")
+	})
 }
 
 func TestProjectFromSetOfFiles(t *testing.T) {
@@ -181,8 +236,8 @@ func TestProjectComposefilesFromWorkingDir(t *testing.T) {
 	assert.NilError(t, err)
 	currentDir, _ := os.Getwd()
 	assert.DeepEqual(t, p.ComposeFiles, []string{
-		filepath.Join(currentDir, "testdata/simple/compose.yaml"),
-		filepath.Join(currentDir, "testdata/simple/compose-with-overrides.yaml"),
+		filepath.Join(currentDir, "testdata", "simple", "compose.yaml"),
+		filepath.Join(currentDir, "testdata", "simple", "compose-with-overrides.yaml"),
 	})
 }
 
@@ -216,6 +271,24 @@ func TestProjectWithDiscardEnvFile(t *testing.T) {
 	assert.NilError(t, err)
 	assert.Equal(t, *service.Environment["DEFAULT_PORT"], "8080")
 	assert.Assert(t, service.EnvFile == nil)
+	assert.Equal(t, service.Ports[0].Published, "8000")
+}
+
+func TestProjectWithMultipleEnvFile(t *testing.T) {
+	opts, err := NewProjectOptions([]string{
+		"testdata/env-file/compose-with-env-files.yaml",
+	}, WithDiscardEnvFile,
+		WithEnvFiles("testdata/env-file/.env", "testdata/env-file/override.env"),
+		WithDotEnv)
+
+	assert.NilError(t, err)
+	p, err := ProjectFromOptions(opts)
+	assert.NilError(t, err)
+	service, err := p.GetService("simple")
+	assert.NilError(t, err)
+	assert.Equal(t, *service.Environment["DEFAULT_PORT"], "9090")
+	assert.Assert(t, service.EnvFile == nil)
+	assert.Equal(t, service.Ports[0].Published, "9000")
 }
 
 func TestProjectNameFromWorkingDir(t *testing.T) {
@@ -231,8 +304,51 @@ func TestProjectNameFromWorkingDir(t *testing.T) {
 func TestEnvMap(t *testing.T) {
 	m := map[string]string{}
 	m["foo"] = "bar"
-	l := getAsStringList(m)
+	l := utils.GetAsStringList(m)
 	assert.Equal(t, l[0], "foo=bar")
-	m = getAsEqualsMap(l)
+	m = utils.GetAsEqualsMap(l)
 	assert.Equal(t, m["foo"], "bar")
+}
+
+func TestEnvVariablePrecedence(t *testing.T) {
+	testcases := []struct {
+		name     string
+		dotEnv   string
+		osEnv    []string
+		expected types.Mapping
+	}{
+		{
+			"no value set in environment",
+			"FOO=foo\nBAR=${FOO}",
+			nil,
+			types.Mapping{
+				"FOO": "foo",
+				"BAR": "foo",
+			},
+		},
+		{
+			"conflict with value set in environment",
+			"FOO=foo\nBAR=${FOO}",
+			[]string{"FOO=zot"},
+			types.Mapping{
+				"FOO": "zot",
+				"BAR": "zot",
+			},
+		},
+	}
+
+	for _, test := range testcases {
+		t.Run(test.name, func(t *testing.T) {
+			wd := t.TempDir()
+			err := os.WriteFile(filepath.Join(wd, ".env"), []byte(test.dotEnv), 0o700)
+			assert.NilError(t, err)
+			options, err := NewProjectOptions(nil,
+				// First load os.Env variable, higher in precedence rule
+				WithEnv(test.osEnv),
+				// Then load dotEnv file
+				WithWorkingDirectory(wd), WithDotEnv)
+			assert.NilError(t, err)
+			assert.DeepEqual(t, test.expected, options.Environment)
+		})
+	}
 }

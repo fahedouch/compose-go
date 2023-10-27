@@ -25,13 +25,13 @@ import (
 	"github.com/compose-spec/compose-go/types"
 )
 
-func fullExampleConfig(workingDir, homeDir string) *types.Config {
-	return &types.Config{
+func fullExampleProject(workingDir, homeDir string) *types.Project {
+	return &types.Project{
 		Name:     "full_example_project_name",
 		Services: services(workingDir, homeDir),
 		Networks: networks(),
 		Volumes:  volumes(),
-		Configs:  configs(workingDir),
+		Configs:  configs(workingDir, homeDir),
 		Secrets:  secrets(workingDir),
 		Extensions: map[string]interface{}{
 			"x-foo": "bar",
@@ -49,15 +49,19 @@ func services(workingDir, homeDir string) []types.ServiceConfig {
 		{
 			Name: "foo",
 
+			Annotations: map[string]string{
+				"com.example.foo": "bar",
+			},
 			Build: &types.BuildConfig{
-				Context:    "./dir",
-				Dockerfile: "Dockerfile",
-				Args:       map[string]*string{"foo": strPtr("bar")},
-				SSH:        []types.SSHKey{{ID: "default", Path: ""}},
-				Target:     "foo",
-				Network:    "foo",
-				CacheFrom:  []string{"foo", "bar"},
-				Labels:     map[string]string{"FOO": "BAR"},
+				Context:            filepath.Join(workingDir, "dir"),
+				Dockerfile:         "Dockerfile",
+				Args:               map[string]*string{"foo": strPtr("bar")},
+				SSH:                []types.SSHKey{{ID: "default", Path: ""}},
+				Target:             "foo",
+				Network:            "foo",
+				CacheFrom:          []string{"foo", "bar"},
+				AdditionalContexts: types.Mapping{"foo": filepath.Join(workingDir, "bar")},
+				Labels:             map[string]string{"FOO": "BAR"},
 				Secrets: []types.ServiceSecretConfig{
 					{
 						Source: "secret1",
@@ -67,10 +71,11 @@ func services(workingDir, homeDir string) []types.ServiceConfig {
 						Target: "my_secret",
 						UID:    "103",
 						GID:    "103",
-						Mode:   uint32Ptr(0440),
+						Mode:   uint32Ptr(0o440),
 					},
 				},
-				Tags: []string{"foo:v1.0.0", "docker.io/username/foo:my-other-tag"},
+				Tags:      []string{"foo:v1.0.0", "docker.io/username/foo:my-other-tag", "full_example_project_name:1.0.0"},
+				Platforms: []string{"linux/amd64", "linux/arm64"},
 			},
 			CapAdd:       []string{"ALL"},
 			CapDrop:      []string{"NET_ADMIN", "SYS_ADMIN"},
@@ -85,13 +90,13 @@ func services(workingDir, homeDir string) []types.ServiceConfig {
 					Target: "/my_config",
 					UID:    "103",
 					GID:    "103",
-					Mode:   uint32Ptr(0440),
+					Mode:   uint32Ptr(0o440),
 				},
 			},
 			ContainerName: "my-web-container",
 			DependsOn: types.DependsOnConfig{
-				"db":    {Condition: types.ServiceConditionStarted},
-				"redis": {Condition: types.ServiceConditionStarted},
+				"db":    {Condition: types.ServiceConditionStarted, Required: true},
+				"redis": {Condition: types.ServiceConditionStarted, Required: true},
 			},
 			Deploy: &types.DeployConfig{
 				Mode:     "replicated",
@@ -164,14 +169,16 @@ func services(workingDir, homeDir string) []types.ServiceConfig {
 			DomainName: "foo.com",
 			Entrypoint: []string{"/code/entrypoint.sh", "-p", "3000"},
 			Environment: map[string]*string{
-				"FOO": strPtr("foo_from_env_file"),
-				"BAR": strPtr("bar_from_env_file_2"),
-				"BAZ": strPtr("baz_from_service_def"),
-				"QUX": strPtr("qux_from_environment"),
+				"FOO":                 strPtr("foo_from_env_file"),
+				"BAR":                 strPtr("bar_from_env_file_2"),
+				"BAZ":                 strPtr("baz_from_service_def"),
+				"QUX":                 strPtr("qux_from_environment"),
+				"ENV.WITH.DOT":        strPtr("ok"),
+				"ENV_WITH_UNDERSCORE": strPtr("ok"),
 			},
 			EnvFile: []string{
-				"./example1.env",
-				"./example2.env",
+				filepath.Join(workingDir, "example1.env"),
+				filepath.Join(workingDir, "example2.env"),
 			},
 			Expose: []string{"3000", "8000"},
 			ExternalLinks: []string{
@@ -188,15 +195,17 @@ func services(workingDir, homeDir string) []types.ServiceConfig {
 				"x-foo": "bar",
 			},
 			HealthCheck: &types.HealthCheckConfig{
-				Test:        types.HealthCheckTest([]string{"CMD-SHELL", "echo \"hello world\""}),
-				Interval:    durationPtr(10 * time.Second),
-				Timeout:     durationPtr(1 * time.Second),
-				Retries:     uint64Ptr(5),
-				StartPeriod: durationPtr(15 * time.Second),
+				Test:          types.HealthCheckTest([]string{"CMD-SHELL", "echo \"hello world\""}),
+				Interval:      durationPtr(10 * time.Second),
+				Timeout:       durationPtr(1 * time.Second),
+				Retries:       uint64Ptr(5),
+				StartPeriod:   durationPtr(15 * time.Second),
+				StartInterval: durationPtr(5 * time.Second),
 			},
 			Hostname: "foo",
 			Image:    "redis",
 			Ipc:      "host",
+			Uts:      "host",
 			Labels: map[string]string{
 				"com.example.description": "Accounting webapp",
 				"com.example.number":      "42",
@@ -387,7 +396,7 @@ func services(workingDir, homeDir string) []types.ServiceConfig {
 					Target: "my_secret",
 					UID:    "103",
 					GID:    "103",
-					Mode:   uint32Ptr(0440),
+					Mode:   uint32Ptr(0o440),
 				},
 			},
 			SecurityOpt: []string{
@@ -418,7 +427,7 @@ func services(workingDir, homeDir string) []types.ServiceConfig {
 				{Source: "/opt/data", Target: "/var/lib/mysql", Type: "bind", Bind: &types.ServiceVolumeBind{CreateHostPath: true}},
 				{Source: workingDir, Target: "/code", Type: "bind", Bind: &types.ServiceVolumeBind{CreateHostPath: true}},
 				{Source: filepath.Join(workingDir, "static"), Target: "/var/www/html", Type: "bind", Bind: &types.ServiceVolumeBind{CreateHostPath: true}},
-				{Source: filepath.Join(homeDir, "/configs"), Target: "/etc/configs", Type: "bind", ReadOnly: true, Bind: &types.ServiceVolumeBind{CreateHostPath: true}},
+				{Source: filepath.Join(homeDir, "configs"), Target: "/etc/configs", Type: "bind", ReadOnly: true, Bind: &types.ServiceVolumeBind{CreateHostPath: true}},
 				{Source: "datavolume", Target: "/var/lib/mysql", Type: "volume", Volume: &types.ServiceVolumeVolume{}},
 				{Source: filepath.Join(workingDir, "opt"), Target: "/opt", Consistency: "cached", Type: "bind"},
 				{Target: "/opt", Type: "tmpfs", Tmpfs: &types.ServiceVolumeTmpfs{
@@ -426,6 +435,15 @@ func services(workingDir, homeDir string) []types.ServiceConfig {
 				}},
 			},
 			WorkingDir: "/code",
+		},
+		{
+			Name: "bar",
+			Build: &types.BuildConfig{
+				Context:          workingDir,
+				DockerfileInline: "FROM alpine\nRUN echo \"hello\" > /world.txt\n",
+			},
+			Environment: types.MappingWithEquals{},
+			Scale:       1,
 		},
 	}
 }
@@ -520,7 +538,7 @@ func volumes() map[string]types.VolumeConfig {
 	}
 }
 
-func configs(workingDir string) map[string]types.ConfigObjConfig {
+func configs(workingDir string, homeDir string) map[string]types.ConfigObjConfig {
 	return map[string]types.ConfigObjConfig{
 		"config1": {
 			File: filepath.Join(workingDir, "config_data"),
@@ -538,7 +556,7 @@ func configs(workingDir string) map[string]types.ConfigObjConfig {
 		},
 		"config4": {
 			Name: "foo",
-			File: workingDir,
+			File: filepath.Join(homeDir, "config_data"),
 			Extensions: map[string]interface{}{
 				"x-bar": "baz",
 				"x-foo": "bar",
@@ -564,12 +582,15 @@ func secrets(workingDir string) map[string]types.SecretConfig {
 			External: types.External{External: true},
 		},
 		"secret4": {
-			Name: "bar",
-			File: workingDir,
+			Name:        "bar",
+			Environment: "BAR",
 			Extensions: map[string]interface{}{
 				"x-bar": "baz",
 				"x-foo": "bar",
 			},
+		},
+		"secret5": {
+			File: "/abs/secret_data",
 		},
 	}
 }
@@ -577,56 +598,72 @@ func secrets(workingDir string) map[string]types.SecretConfig {
 func fullExampleYAML(workingDir, homeDir string) string {
 	return fmt.Sprintf(`name: full_example_project_name
 services:
-  foo:
+  bar:
     build:
-      context: ./dir
+      context: %s
+      dockerfile_inline: |
+        FROM alpine
+        RUN echo "hello" > /world.txt
+  foo:
+    annotations:
+      com.example.foo: bar
+    build:
+      context: %s
       dockerfile: Dockerfile
       args:
         foo: bar
       ssh:
-      - default
+        - default
       labels:
         FOO: BAR
       cache_from:
-      - foo
-      - bar
+        - foo
+        - bar
+      additional_contexts:
+        foo: %s
       network: foo
       target: foo
       secrets:
-      - source: secret1
-      - source: secret2
-        target: my_secret
+        - source: secret1
+        - source: secret2
+          target: my_secret
+          uid: "103"
+          gid: "103"
+          mode: 288
+      tags:
+        - foo:v1.0.0
+        - docker.io/username/foo:my-other-tag
+        - full_example_project_name:1.0.0
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    cap_add:
+      - ALL
+    cap_drop:
+      - NET_ADMIN
+      - SYS_ADMIN
+    cgroup_parent: m-executor-abcd
+    command:
+      - bundle
+      - exec
+      - thin
+      - -p
+      - "3000"
+    configs:
+      - source: config1
+      - source: config2
+        target: /my_config
         uid: "103"
         gid: "103"
         mode: 288
-      tags:
-      - foo:v1.0.0
-      - docker.io/username/foo:my-other-tag
-    cap_add:
-    - ALL
-    cap_drop:
-    - NET_ADMIN
-    - SYS_ADMIN
-    cgroup_parent: m-executor-abcd
-    command:
-    - bundle
-    - exec
-    - thin
-    - -p
-    - "3000"
-    configs:
-    - source: config1
-    - source: config2
-      target: /my_config
-      uid: "103"
-      gid: "103"
-      mode: 288
     container_name: my-web-container
     depends_on:
       db:
         condition: service_started
+        required: true
       redis:
         condition: service_started
+        required: true
     deploy:
       mode: replicated
       replicas: 6
@@ -654,12 +691,12 @@ services:
           cpus: "0.0001"
           memory: "20971520"
           generic_resources:
-          - discrete_resource_spec:
-              kind: gpu
-              value: 2
-          - discrete_resource_spec:
-              kind: ssd
-              value: 1
+            - discrete_resource_spec:
+                kind: gpu
+                value: 2
+            - discrete_resource_spec:
+                kind: ssd
+                value: 1
       restart_policy:
         condition: on-failure
         delay: 5s
@@ -667,54 +704,57 @@ services:
         window: 2m0s
       placement:
         constraints:
-        - node=foo
+          - node=foo
         preferences:
-        - spread: node.labels.az
+          - spread: node.labels.az
         max_replicas_per_node: 5
       endpoint_mode: dnsrr
     device_cgroup_rules:
-    - c 1:3 mr
-    - a 7:* rmw
+      - c 1:3 mr
+      - a 7:* rmw
     devices:
-    - /dev/ttyUSB0:/dev/ttyUSB0
+      - /dev/ttyUSB0:/dev/ttyUSB0
     dns:
-    - 8.8.8.8
-    - 9.9.9.9
+      - 8.8.8.8
+      - 9.9.9.9
     dns_search:
-    - dc1.example.com
-    - dc2.example.com
+      - dc1.example.com
+      - dc2.example.com
     domainname: foo.com
     entrypoint:
-    - /code/entrypoint.sh
-    - -p
-    - "3000"
+      - /code/entrypoint.sh
+      - -p
+      - "3000"
     environment:
       BAR: bar_from_env_file_2
       BAZ: baz_from_service_def
+      ENV.WITH.DOT: ok
+      ENV_WITH_UNDERSCORE: ok
       FOO: foo_from_env_file
       QUX: qux_from_environment
     env_file:
-    - ./example1.env
-    - ./example2.env
+      - %s
+      - %s
     expose:
-    - "3000"
-    - "8000"
+      - "3000"
+      - "8000"
     external_links:
-    - redis_1
-    - project_db_1:mysql
-    - project_db_1:postgresql
+      - redis_1
+      - project_db_1:mysql
+      - project_db_1:postgresql
     extra_hosts:
-      otherhost: 50.31.209.229
-      somehost: 162.242.195.82
+      - otherhost:50.31.209.229
+      - somehost:162.242.195.82
     hostname: foo
     healthcheck:
       test:
-      - CMD-SHELL
-      - echo "hello world"
+        - CMD-SHELL
+        - echo "hello world"
       timeout: 1s
       interval: 10s
       retries: 5
       start_period: 15s
+      start_interval: 5s
     image: redis
     ipc: host
     labels:
@@ -722,9 +762,9 @@ services:
       com.example.empty-label: ""
       com.example.number: "42"
     links:
-    - db
-    - db:database
-    - redis
+      - db
+      - db:database
+      - redis
     logging:
       driver: syslog
       options:
@@ -738,117 +778,117 @@ services:
       other-other-network: null
       some-network:
         aliases:
-        - alias1
-        - alias3
+          - alias1
+          - alias3
     pid: host
     ports:
-    - mode: ingress
-      target: 3000
-      protocol: tcp
-    - mode: ingress
-      target: 3001
-      protocol: tcp
-    - mode: ingress
-      target: 3002
-      protocol: tcp
-    - mode: ingress
-      target: 3003
-      protocol: tcp
-    - mode: ingress
-      target: 3004
-      protocol: tcp
-    - mode: ingress
-      target: 3005
-      protocol: tcp
-    - mode: ingress
-      target: 8000
-      published: "8000"
-      protocol: tcp
-    - mode: ingress
-      target: 8080
-      published: "9090"
-      protocol: tcp
-    - mode: ingress
-      target: 8081
-      published: "9091"
-      protocol: tcp
-    - mode: ingress
-      target: 22
-      published: "49100"
-      protocol: tcp
-    - mode: ingress
-      host_ip: 127.0.0.1
-      target: 8001
-      published: "8001"
-      protocol: tcp
-    - mode: ingress
-      host_ip: 127.0.0.1
-      target: 5000
-      published: "5000"
-      protocol: tcp
-    - mode: ingress
-      host_ip: 127.0.0.1
-      target: 5001
-      published: "5001"
-      protocol: tcp
-    - mode: ingress
-      host_ip: 127.0.0.1
-      target: 5002
-      published: "5002"
-      protocol: tcp
-    - mode: ingress
-      host_ip: 127.0.0.1
-      target: 5003
-      published: "5003"
-      protocol: tcp
-    - mode: ingress
-      host_ip: 127.0.0.1
-      target: 5004
-      published: "5004"
-      protocol: tcp
-    - mode: ingress
-      host_ip: 127.0.0.1
-      target: 5005
-      published: "5005"
-      protocol: tcp
-    - mode: ingress
-      host_ip: 127.0.0.1
-      target: 5006
-      published: "5006"
-      protocol: tcp
-    - mode: ingress
-      host_ip: 127.0.0.1
-      target: 5007
-      published: "5007"
-      protocol: tcp
-    - mode: ingress
-      host_ip: 127.0.0.1
-      target: 5008
-      published: "5008"
-      protocol: tcp
-    - mode: ingress
-      host_ip: 127.0.0.1
-      target: 5009
-      published: "5009"
-      protocol: tcp
-    - mode: ingress
-      host_ip: 127.0.0.1
-      target: 5010
-      published: "5010"
-      protocol: tcp
+      - mode: ingress
+        target: 3000
+        protocol: tcp
+      - mode: ingress
+        target: 3001
+        protocol: tcp
+      - mode: ingress
+        target: 3002
+        protocol: tcp
+      - mode: ingress
+        target: 3003
+        protocol: tcp
+      - mode: ingress
+        target: 3004
+        protocol: tcp
+      - mode: ingress
+        target: 3005
+        protocol: tcp
+      - mode: ingress
+        target: 8000
+        published: "8000"
+        protocol: tcp
+      - mode: ingress
+        target: 8080
+        published: "9090"
+        protocol: tcp
+      - mode: ingress
+        target: 8081
+        published: "9091"
+        protocol: tcp
+      - mode: ingress
+        target: 22
+        published: "49100"
+        protocol: tcp
+      - mode: ingress
+        host_ip: 127.0.0.1
+        target: 8001
+        published: "8001"
+        protocol: tcp
+      - mode: ingress
+        host_ip: 127.0.0.1
+        target: 5000
+        published: "5000"
+        protocol: tcp
+      - mode: ingress
+        host_ip: 127.0.0.1
+        target: 5001
+        published: "5001"
+        protocol: tcp
+      - mode: ingress
+        host_ip: 127.0.0.1
+        target: 5002
+        published: "5002"
+        protocol: tcp
+      - mode: ingress
+        host_ip: 127.0.0.1
+        target: 5003
+        published: "5003"
+        protocol: tcp
+      - mode: ingress
+        host_ip: 127.0.0.1
+        target: 5004
+        published: "5004"
+        protocol: tcp
+      - mode: ingress
+        host_ip: 127.0.0.1
+        target: 5005
+        published: "5005"
+        protocol: tcp
+      - mode: ingress
+        host_ip: 127.0.0.1
+        target: 5006
+        published: "5006"
+        protocol: tcp
+      - mode: ingress
+        host_ip: 127.0.0.1
+        target: 5007
+        published: "5007"
+        protocol: tcp
+      - mode: ingress
+        host_ip: 127.0.0.1
+        target: 5008
+        published: "5008"
+        protocol: tcp
+      - mode: ingress
+        host_ip: 127.0.0.1
+        target: 5009
+        published: "5009"
+        protocol: tcp
+      - mode: ingress
+        host_ip: 127.0.0.1
+        target: 5010
+        published: "5010"
+        protocol: tcp
     privileged: true
     read_only: true
     restart: always
     secrets:
-    - source: secret1
-    - source: secret2
-      target: my_secret
-      uid: "103"
-      gid: "103"
-      mode: 288
+      - source: secret1
+      - source: secret2
+        target: my_secret
+        uid: "103"
+        gid: "103"
+        mode: 288
     security_opt:
-    - label=level:s0:c100,c200
-    - label=type:svirt_apache_t
+      - label=level:s0:c100,c200
+      - label=type:svirt_apache_t
     stdin_open: true
     stop_grace_period: 20s
     stop_signal: SIGUSR1
@@ -856,8 +896,8 @@ services:
       net.core.somaxconn: "1024"
       net.ipv4.tcp_syncookies: "0"
     tmpfs:
-    - /run
-    - /tmp
+      - /run
+      - /tmp
     tty: true
     ulimits:
       nofile:
@@ -865,43 +905,44 @@ services:
         hard: 40000
       nproc: 65535
     user: someone
+    uts: host
     volumes:
-    - type: volume
-      target: /var/lib/mysql
-      volume: {}
-    - type: bind
-      source: /opt/data
-      target: /var/lib/mysql
-      bind:
-        create_host_path: true
-    - type: bind
-      source: %s
-      target: /code
-      bind:
-        create_host_path: true
-    - type: bind
-      source: %s
-      target: /var/www/html
-      bind:
-        create_host_path: true
-    - type: bind
-      source: %s
-      target: /etc/configs
-      read_only: true
-      bind:
-        create_host_path: true
-    - type: volume
-      source: datavolume
-      target: /var/lib/mysql
-      volume: {}
-    - type: bind
-      source: %s
-      target: /opt
-      consistency: cached
-    - type: tmpfs
-      target: /opt
-      tmpfs:
-        size: "10000"
+      - type: volume
+        target: /var/lib/mysql
+        volume: {}
+      - type: bind
+        source: /opt/data
+        target: /var/lib/mysql
+        bind:
+          create_host_path: true
+      - type: bind
+        source: %s
+        target: /code
+        bind:
+          create_host_path: true
+      - type: bind
+        source: %s
+        target: /var/www/html
+        bind:
+          create_host_path: true
+      - type: bind
+        source: %s
+        target: /etc/configs
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: volume
+        source: datavolume
+        target: /var/lib/mysql
+        volume: {}
+      - type: bind
+        source: %s
+        target: /opt
+        consistency: cached
+      - type: tmpfs
+        target: /opt
+        tmpfs:
+          size: "10000"
     working_dir: /code
     x-bar: baz
     x-foo: bar
@@ -922,15 +963,15 @@ networks:
     ipam:
       driver: overlay
       config:
-      - subnet: 172.28.0.0/16
-        gateway: 172.28.5.254
-        ip_range: 172.28.5.0/24
-        aux_addresses:
-          host1: 172.28.1.5
-          host2: 172.28.1.6
-          host3: 172.28.1.7
-      - subnet: 2001:3984:3989::/64
-        gateway: 2001:3984:3989::1
+        - subnet: 172.28.0.0/16
+          gateway: 172.28.5.254
+          ip_range: 172.28.5.0/24
+          aux_addresses:
+            host1: 172.28.1.5
+            host2: 172.28.1.6
+            host3: 172.28.1.7
+        - subnet: 2001:3984:3989::/64
+          gateway: 2001:3984:3989::1
     labels:
       foo: bar
   some-network: {}
@@ -973,9 +1014,11 @@ secrets:
     external: true
   secret4:
     name: bar
-    file: %s
+    environment: BAR
     x-bar: baz
     x-foo: bar
+  secret5:
+    file: /abs/secret_data
 configs:
   config1:
     file: %s
@@ -998,14 +1041,18 @@ x-nested:
   bar: baz
   foo: bar
 `,
-		filepath.Join(workingDir),
+		workingDir,
+		filepath.Join(workingDir, "dir"),
+		filepath.Join(workingDir, "bar"),
+		filepath.Join(workingDir, "example1.env"),
+		filepath.Join(workingDir, "example2.env"),
+		workingDir,
 		filepath.Join(workingDir, "static"),
 		filepath.Join(homeDir, "configs"),
 		filepath.Join(workingDir, "opt"),
 		filepath.Join(workingDir, "secret_data"),
-		filepath.Join(workingDir),
 		filepath.Join(workingDir, "config_data"),
-		filepath.Join(workingDir))
+		filepath.Join(homeDir, "config_data"))
 }
 
 func fullExampleJSON(workingDir, homeDir string) string {
@@ -1032,6 +1079,7 @@ func fullExampleJSON(workingDir, homeDir string) string {
       "external": false
     }
   },
+  "name": "full_example_project_name",
   "networks": {
     "external-network": {
       "name": "external-network",
@@ -1096,14 +1144,29 @@ func fullExampleJSON(workingDir, homeDir string) string {
     },
     "secret4": {
       "name": "bar",
-      "file": "%s",
+      "environment": "BAR",
+      "external": false
+    },
+    "secret5": {
+      "file": "/abs/secret_data",
       "external": false
     }
   },
   "services": {
-    "foo": {
+    "bar": {
       "build": {
-        "context": "./dir",
+        "context": "%s",
+        "dockerfile_inline": "FROM alpine\nRUN echo \"hello\" \u003e /world.txt\n"
+      },
+      "command": null,
+      "entrypoint": null
+    },
+    "foo": {
+      "annotations": {
+        "com.example.foo": "bar"
+      },
+      "build": {
+        "context": "%s",
         "dockerfile": "Dockerfile",
         "args": {
           "foo": "bar"
@@ -1118,6 +1181,9 @@ func fullExampleJSON(workingDir, homeDir string) string {
           "foo",
           "bar"
         ],
+        "additional_contexts": {
+          "foo": "%s"
+        },
         "network": "foo",
         "target": "foo",
         "secrets": [
@@ -1134,7 +1200,12 @@ func fullExampleJSON(workingDir, homeDir string) string {
         ],
         "tags": [
           "foo:v1.0.0",
-          "docker.io/username/foo:my-other-tag"
+          "docker.io/username/foo:my-other-tag",
+          "full_example_project_name:1.0.0"
+        ],
+        "platforms": [
+          "linux/amd64",
+          "linux/arm64"
         ]
       },
       "cap_add": [
@@ -1167,10 +1238,12 @@ func fullExampleJSON(workingDir, homeDir string) string {
       "container_name": "my-web-container",
       "depends_on": {
         "db": {
-          "condition": "service_started"
+          "condition": "service_started",
+          "required": true
         },
         "redis": {
-          "condition": "service_started"
+          "condition": "service_started",
+          "required": true
         }
       },
       "deploy": {
@@ -1262,12 +1335,14 @@ func fullExampleJSON(workingDir, homeDir string) string {
       "environment": {
         "BAR": "bar_from_env_file_2",
         "BAZ": "baz_from_service_def",
+        "ENV.WITH.DOT": "ok",
+        "ENV_WITH_UNDERSCORE": "ok",
         "FOO": "foo_from_env_file",
         "QUX": "qux_from_environment"
       },
       "env_file": [
-        "./example1.env",
-        "./example2.env"
+        "%s",
+        "%s"
       ],
       "expose": [
         "3000",
@@ -1278,10 +1353,10 @@ func fullExampleJSON(workingDir, homeDir string) string {
         "project_db_1:mysql",
         "project_db_1:postgresql"
       ],
-      "extra_hosts": {
-        "otherhost": "50.31.209.229",
-        "somehost": "162.242.195.82"
-      },
+      "extra_hosts": [
+        "otherhost:50.31.209.229",
+        "somehost:162.242.195.82"
+      ],
       "hostname": "foo",
       "healthcheck": {
         "test": [
@@ -1291,7 +1366,8 @@ func fullExampleJSON(workingDir, homeDir string) string {
         "timeout": "1s",
         "interval": "10s",
         "retries": 5,
-        "start_period": "15s"
+        "start_period": "15s",
+        "start_interval": "5s"
       },
       "image": "redis",
       "ipc": "host",
@@ -1506,6 +1582,7 @@ func fullExampleJSON(workingDir, homeDir string) string {
         "nproc": 65535
       },
       "user": "someone",
+      "uts": "host",
       "volumes": [
         {
           "type": "volume",
@@ -1613,9 +1690,13 @@ func fullExampleJSON(workingDir, homeDir string) string {
   }
 }`,
 		toPath(workingDir, "config_data"),
-		toPath(workingDir),
+		toPath(homeDir, "config_data"),
 		toPath(workingDir, "secret_data"),
 		toPath(workingDir),
+		toPath(workingDir, "dir"),
+		toPath(workingDir, "bar"),
+		toPath(workingDir, "example1.env"),
+		toPath(workingDir, "example2.env"),
 		toPath(workingDir),
 		toPath(workingDir, "static"),
 		toPath(homeDir, "configs"),

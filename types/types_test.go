@@ -17,7 +17,13 @@
 package types
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
@@ -270,4 +276,106 @@ func TestNetworksByPriority(t *testing.T) {
 		},
 	}
 	assert.DeepEqual(t, s.NetworksByPriority(), []string{"qix", "zot", "bar", "foo"})
+}
+
+func TestMarshalServiceEntrypoint(t *testing.T) {
+	t.Parallel()
+
+	tcs := []struct {
+		name         string
+		entrypoint   ShellCommand
+		expectedYAML string
+		expectedJSON string
+	}{
+		{
+			name:         "nil",
+			entrypoint:   nil,
+			expectedYAML: `{}`,
+			expectedJSON: `{"command":null,"entrypoint":null}`,
+		},
+		{
+			name:         "empty",
+			entrypoint:   make([]string, 0),
+			expectedYAML: `entrypoint: []`,
+			expectedJSON: `{"command":null,"entrypoint":[]}`,
+		},
+		{
+			name:         "value",
+			entrypoint:   ShellCommand{"ls", "/"},
+			expectedYAML: "entrypoint:\n    - ls\n    - /",
+			expectedJSON: `{"command":null,"entrypoint":["ls","/"]}`,
+		},
+	}
+
+	assertEqual := func(t testing.TB, actualBytes []byte, expected string) {
+		t.Helper()
+		actual := strings.TrimSpace(string(actualBytes))
+		expected = strings.TrimSpace(expected)
+		assert.Equal(t, actual, expected)
+	}
+
+	for _, tc := range tcs {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := ServiceConfig{Entrypoint: tc.entrypoint}
+			actualYAML, err := yaml.Marshal(s)
+			assert.NilError(t, err, "YAML marshal failed")
+			assertEqual(t, actualYAML, tc.expectedYAML)
+
+			actualJSON, err := json.Marshal(s)
+			assert.NilError(t, err, "JSON marshal failed")
+			assertEqual(t, actualJSON, tc.expectedJSON)
+		})
+	}
+
+}
+
+func TestMarshalBuild_DockerfileInline(t *testing.T) {
+	b := BuildConfig{
+		DockerfileInline: "FROM alpine\n\n# echo the env\nRUN env\n\nENTRYPOINT /bin/echo\n",
+	}
+	out, err := yaml.Marshal(b)
+	assert.NilError(t, err)
+
+	const expected = `
+dockerfile_inline: |
+    FROM alpine
+
+    # echo the env
+    RUN env
+
+    ENTRYPOINT /bin/echo
+`
+	assert.Check(t, equalTrimSpace(out, expected))
+
+	// round-trip
+	var b2 BuildConfig
+	assert.NilError(t, yaml.Unmarshal(out, &b2))
+	assert.Check(t, equalTrimSpace(b.DockerfileInline, b2.DockerfileInline))
+}
+
+func equalTrimSpace(x interface{}, y interface{}) is.Comparison {
+	trim := func(v interface{}) interface{} {
+		switch vv := v.(type) {
+		case string:
+			return strings.TrimSpace(vv)
+		case []byte:
+			return string(bytes.TrimSpace(vv))
+		}
+		panic(fmt.Errorf("invalid type %T (value: %+v)", v, v))
+	}
+	return is.DeepEqual(trim(x), trim(y))
+}
+
+func TestMappingValues(t *testing.T) {
+	values := []string{"BAR=QIX", "FOO=BAR", "QIX=ZOT"}
+	mapping := NewMapping(values)
+	assert.DeepEqual(t, mapping, Mapping{
+		"FOO": "BAR",
+		"BAR": "QIX",
+		"QIX": "ZOT",
+	})
+	assert.DeepEqual(t, mapping.Values(), values)
 }

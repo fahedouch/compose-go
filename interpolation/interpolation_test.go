@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/compose-spec/compose-go/tree"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 )
@@ -73,7 +74,9 @@ func TestInvalidInterpolation(t *testing.T) {
 		},
 	}
 	_, err := Interpolate(services, Options{LookupValue: defaultMapping})
-	assert.Error(t, err, `invalid interpolation format for servicea.image: "${". You may need to escape any $ with another $`)
+	assert.Error(t, err, `invalid interpolation format for servicea.image.
+You may need to escape any $ with another $.
+${`)
 }
 
 func TestInterpolateWithDefaults(t *testing.T) {
@@ -112,9 +115,15 @@ func TestValidUnexistentInterpolation(t *testing.T) {
 		{test: "{{{ ${FOO:?foo_} }}}", errMsg: "foo_"},
 		{test: "{{{ ${FOO:?foo-bar-value} }}}", errMsg: "foo-bar-value"},
 		{test: "{{{ ${FOO:?foo} ${BAR:-DEFAULT_VALUE} }}}", errMsg: "foo"},
+		{test: "${FOO:?foo} ${BAR:?bar}", errMsg: "foo"},
 		{test: "{{{ ${BAR} }}}", expected: "{{{  }}}"},
 		{test: "${FOO:?baz} }}}", errMsg: "baz"},
 		{test: "${FOO?baz} }}}", errMsg: "baz"},
+		// nested variables
+		{test: "${FOO:-${BAR:-${ZOT:-qix}}}", expected: "qix"},
+		{test: "${FOO:-${BAR:-x}_test_${BAR:-y}}", expected: "x_test_y"},
+		{test: "${FOO:-${BAR:-x}_test}", expected: "x_test"},
+		{test: "${FOO:-${BAR:-${ZOT:-x}}_test}", expected: "x_test"},
 	}
 
 	getServiceConfig := func(val string) map[string]interface{} {
@@ -131,8 +140,7 @@ func TestValidUnexistentInterpolation(t *testing.T) {
 	}
 
 	getFullErrorMsg := func(msg string) string {
-		return fmt.Sprintf("invalid interpolation format for myservice.environment.TESTVAR: "+
-			"\"required variable FOO is missing a value: %s\". You may need to escape any $ with another $", msg)
+		return fmt.Sprintf("error while interpolating myservice.environment.TESTVAR: required variable FOO is missing a value: %s", msg)
 	}
 
 	for _, testcase := range testcases {
@@ -195,7 +203,7 @@ func TestInterpolateWithCast(t *testing.T) {
 	}
 	result, err := Interpolate(config, Options{
 		LookupValue:     defaultMapping,
-		TypeCastMapping: map[Path]Cast{NewPath(PathMatchAll, "replicas"): toInt},
+		TypeCastMapping: map[tree.Path]Cast{tree.NewPath(tree.PathMatchAll, "replicas"): toInt},
 	})
 	assert.NilError(t, err)
 	expected := map[string]interface{}{
@@ -209,44 +217,44 @@ func TestInterpolateWithCast(t *testing.T) {
 func TestPathMatches(t *testing.T) {
 	var testcases = []struct {
 		doc      string
-		path     Path
-		pattern  Path
+		path     tree.Path
+		pattern  tree.Path
 		expected bool
 	}{
 		{
 			doc:     "pattern too short",
-			path:    NewPath("one", "two", "three"),
-			pattern: NewPath("one", "two"),
+			path:    tree.NewPath("one", "two", "three"),
+			pattern: tree.NewPath("one", "two"),
 		},
 		{
 			doc:     "pattern too long",
-			path:    NewPath("one", "two"),
-			pattern: NewPath("one", "two", "three"),
+			path:    tree.NewPath("one", "two"),
+			pattern: tree.NewPath("one", "two", "three"),
 		},
 		{
 			doc:     "pattern mismatch",
-			path:    NewPath("one", "three", "two"),
-			pattern: NewPath("one", "two", "three"),
+			path:    tree.NewPath("one", "three", "two"),
+			pattern: tree.NewPath("one", "two", "three"),
 		},
 		{
 			doc:     "pattern mismatch with match-all part",
-			path:    NewPath("one", "three", "two"),
-			pattern: NewPath(PathMatchAll, "two", "three"),
+			path:    tree.NewPath("one", "three", "two"),
+			pattern: tree.NewPath(tree.PathMatchAll, "two", "three"),
 		},
 		{
 			doc:      "pattern match with match-all part",
-			path:     NewPath("one", "two", "three"),
-			pattern:  NewPath("one", "*", "three"),
+			path:     tree.NewPath("one", "two", "three"),
+			pattern:  tree.NewPath("one", "*", "three"),
 			expected: true,
 		},
 		{
 			doc:      "pattern match",
-			path:     NewPath("one", "two", "three"),
-			pattern:  NewPath("one", "two", "three"),
+			path:     tree.NewPath("one", "two", "three"),
+			pattern:  tree.NewPath("one", "two", "three"),
 			expected: true,
 		},
 	}
 	for _, testcase := range testcases {
-		assert.Check(t, is.Equal(testcase.expected, testcase.path.matches(testcase.pattern)))
+		assert.Check(t, is.Equal(testcase.expected, testcase.path.Matches(testcase.pattern)))
 	}
 }

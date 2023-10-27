@@ -20,6 +20,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/compose-spec/compose-go/consts"
 	"github.com/imdario/mergo"
 
 	"github.com/compose-spec/compose-go/types"
@@ -232,6 +233,7 @@ func loadTestProject(configDetails types.ConfigDetails) (*types.Project, error) 
 	return Load(configDetails, func(options *Options) {
 		options.SkipNormalization = true
 		options.SkipConsistencyCheck = true
+		options.ResolvePaths = false
 	})
 }
 
@@ -816,7 +818,7 @@ func TestLoadMultipleServiceNetworks(t *testing.T) {
 			},
 			expected: map[string]*types.ServiceNetworkConfig{
 				"net1": {
-					Aliases: []string{"alias2", "alias3"},
+					Aliases: []string{"alias1", "alias2", "alias3"},
 				},
 				"net2": nil,
 				"net3": {},
@@ -884,6 +886,9 @@ func TestLoadMultipleConfigs(t *testing.T) {
 					"8080:80",
 					"9090:90",
 				},
+				"expose": []interface{}{
+					"8080",
+				},
 				"labels": []interface{}{
 					"foo=bar",
 				},
@@ -915,6 +920,9 @@ func TestLoadMultipleConfigs(t *testing.T) {
 						"target":    81,
 						"published": 8080,
 					},
+				},
+				"expose": []interface{}{
+					"8080",
 				},
 				"labels": map[string]interface{}{
 					"foo": "baz",
@@ -963,6 +971,7 @@ func TestLoadMultipleConfigs(t *testing.T) {
 						"password": strPtr("secret"),
 					},
 				},
+				Expose: []string{"8080"},
 				Ports: []types.ServicePortConfig{
 					{
 						Mode:      "ingress",
@@ -1103,14 +1112,48 @@ func TestMergeUlimitsConfig(t *testing.T) {
 	)
 }
 
-func TestMergeServiceNetworkConfig(t *testing.T) {
-	specials := &specials{
-		m: map[reflect.Type]func(dst, src reflect.Value) error{
-			reflect.TypeOf(&types.ServiceNetworkConfig{}): mergeServiceNetworkConfig,
+func TestInitOverride(t *testing.T) {
+	var (
+		bt = true
+		bf = false
+	)
+	cases := []struct {
+		base     *bool
+		override *bool
+		expect   bool
+	}{
+		{
+			base:     &bt,
+			override: &bf,
+			expect:   false,
+		},
+		{
+			base:     nil,
+			override: &bt,
+			expect:   true,
+		},
+		{
+			base:     &bt,
+			override: nil,
+			expect:   true,
 		},
 	}
+	for _, test := range cases {
+		base := types.ServiceConfig{
+			Init: test.base,
+		}
+		override := types.ServiceConfig{
+			Init: test.override,
+		}
+		config, err := _merge(&base, &override)
+		assert.NilError(t, err)
+		assert.Check(t, *config.Init == test.expect)
+	}
+}
+
+func TestMergeServiceNetworkConfig(t *testing.T) {
 	base := map[string]*types.ServiceNetworkConfig{
-		"override-aliases": {
+		"merge": {
 			Aliases:     []string{"100", "101"},
 			Ipv4Address: "127.0.0.1",
 			Ipv6Address: "0:0:0:0:0:0:0:1",
@@ -1122,7 +1165,7 @@ func TestMergeServiceNetworkConfig(t *testing.T) {
 		},
 	}
 	override := map[string]*types.ServiceNetworkConfig{
-		"override-aliases": {
+		"merge": {
 			Aliases:     []string{"110", "111"},
 			Ipv4Address: "127.0.1.1",
 			Ipv6Address: "0:0:0:0:0:0:1:1",
@@ -1133,14 +1176,14 @@ func TestMergeServiceNetworkConfig(t *testing.T) {
 			Ipv6Address: "0:0:0:0:0:0:3:1",
 		},
 	}
-	err := mergo.Merge(&base, &override, mergo.WithOverride, mergo.WithTransformers(specials))
+	err := mergo.Merge(&base, &override, mergo.WithAppendSlice, mergo.WithOverride)
 	assert.NilError(t, err)
 	assert.DeepEqual(
 		t,
 		base,
 		map[string]*types.ServiceNetworkConfig{
-			"override-aliases": {
-				Aliases:     []string{"110", "111"},
+			"merge": {
+				Aliases:     []string{"100", "101", "110", "111"},
 				Ipv4Address: "127.0.1.1",
 				Ipv6Address: "0:0:0:0:0:0:1:1",
 			},
@@ -1182,7 +1225,7 @@ func TestMergeTopLevelExtensions(t *testing.T) {
 	assert.DeepEqual(t, &types.Project{
 		Name:       "",
 		WorkingDir: "",
-		Services:   types.Services{},
+		Services:   nil,
 		Networks:   types.Networks{},
 		Volumes:    types.Volumes{},
 		Secrets:    types.Secrets{},
@@ -1221,6 +1264,48 @@ func TestMergeCommands(t *testing.T) {
 	merged, err := loadTestProject(configDetails)
 	assert.NilError(t, err)
 	assert.DeepEqual(t, merged.Services[0].Command, types.ShellCommand{"/bin/ash", "-c", "echo 'world'"})
+}
+
+func TestMergeHealthCheck(t *testing.T) {
+	configDetails := types.ConfigDetails{
+		ConfigFiles: []types.ConfigFile{
+			{Filename: "base.yml", Config: map[string]interface{}{
+				"services": map[string]interface{}{
+					"foo": map[string]interface{}{
+						"image": "alpine",
+						"healthcheck": map[string]interface{}{
+							"test": []interface{}{"CMD", "original"},
+						},
+					},
+				},
+			}},
+			{Filename: "override.yml", Config: map[string]interface{}{
+				"services": map[string]interface{}{
+					"foo": map[string]interface{}{
+						"image": "alpine",
+						"healthcheck": map[string]interface{}{
+							"test": []interface{}{"CMD", "override"},
+						},
+					},
+				},
+			}},
+			{Filename: "override.yml", Config: map[string]interface{}{
+				"services": map[string]interface{}{
+					"foo": map[string]interface{}{
+						"image": "alpine",
+						"healthcheck": map[string]interface{}{
+							"timeout": "30s",
+						},
+					},
+				},
+			}},
+		},
+	}
+	merged, err := loadTestProject(configDetails)
+	assert.NilError(t, err)
+	check := merged.Services[0].HealthCheck
+	assert.DeepEqual(t, check.Test, types.HealthCheckTest{"CMD", "override"})
+	assert.Equal(t, check.Timeout.String(), "30s")
 }
 
 func TestMergeEnvironments(t *testing.T) {
@@ -1280,4 +1365,125 @@ func TestMergeExtraHosts(t *testing.T) {
 			"added":             "10.0.0.3",
 		},
 	)
+}
+
+func TestLoadWithNullOverride(t *testing.T) {
+	base := `
+name: test
+services:
+  foo:
+    build:
+      context: .
+      dockerfile: foo.Dockerfile
+    read_only: true
+    environment:
+      FOO: BAR
+    ports:
+      - "8080:80"
+  bar:
+    image: test
+    ports:
+      - "8443:443"
+
+`
+	override := `
+services:
+  foo:
+    image: foo
+    build: !reset  
+    read_only: !reset false
+    environment:
+      FOO: !reset
+    ports: !reset []
+`
+	configDetails := types.ConfigDetails{
+		Environment: map[string]string{},
+		ConfigFiles: []types.ConfigFile{
+			{Filename: "base.yml", Content: []byte(base)},
+			{Filename: "override.yml", Content: []byte(override)},
+		},
+	}
+	config, err := loadTestProject(configDetails)
+	assert.NilError(t, err)
+	assert.DeepEqual(t, &types.Project{
+		Name:       "test",
+		WorkingDir: "",
+		Services: []types.ServiceConfig{
+			{
+				Name:        "bar",
+				Image:       "test",
+				Environment: types.MappingWithEquals{},
+				Ports:       []types.ServicePortConfig{{Mode: "ingress", Target: 443, Published: "8443", Protocol: "tcp"}},
+				Scale:       1,
+			},
+			{
+				Build:       nil,
+				Name:        "foo",
+				Image:       "foo",
+				Environment: types.MappingWithEquals{},
+				Ports:       nil,
+				ReadOnly:    false,
+				Scale:       1,
+			},
+		},
+		Networks:    types.Networks{},
+		Volumes:     types.Volumes{},
+		Secrets:     types.Secrets{},
+		Configs:     types.Configs{},
+		Extensions:  types.Extensions{},
+		Environment: map[string]string{consts.ComposeProjectName: "test"},
+	}, config)
+}
+
+func TestMergeExpose(t *testing.T) {
+	base := `
+name: test
+services:
+  foo:
+    image: foo
+    expose:
+      - "8080"
+      - "8081"
+      - "8082"
+      - "8083"
+      - "8084"
+`
+	override := `
+services:
+  foo:
+    image: foo
+    expose:
+      - "8090"
+      - "8091"
+      - "8082"
+      - "8081"
+`
+	configDetails := types.ConfigDetails{
+		Environment: map[string]string{},
+		ConfigFiles: []types.ConfigFile{
+			{Filename: "base.yml", Content: []byte(base)},
+			{Filename: "override.yml", Content: []byte(override)},
+		},
+	}
+	config, err := loadTestProject(configDetails)
+	assert.NilError(t, err)
+	assert.DeepEqual(t, &types.Project{
+		Name:       "test",
+		WorkingDir: "",
+		Services: []types.ServiceConfig{
+			{
+				Name:        "foo",
+				Image:       "foo",
+				Environment: types.MappingWithEquals{},
+				Expose:      types.StringOrNumberList{"8080", "8081", "8082", "8083", "8084", "8090", "8091"},
+				Scale:       1,
+			},
+		},
+		Networks:    types.Networks{},
+		Volumes:     types.Volumes{},
+		Secrets:     types.Secrets{},
+		Configs:     types.Configs{},
+		Extensions:  types.Extensions{},
+		Environment: map[string]string{consts.ComposeProjectName: "test"},
+	}, config)
 }

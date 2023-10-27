@@ -17,13 +17,10 @@
 package loader
 
 import (
-	"fmt"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/compose-spec/compose-go/types"
-	"gopkg.in/yaml.v2"
 	"gotest.tools/v3/assert"
 )
 
@@ -82,69 +79,11 @@ networks:
   mynet:
     name: myProject_mynet
 `
-	err := normalize(&project, false)
+	err := Normalize(&project)
 	assert.NilError(t, err)
-	marshal, err := yaml.Marshal(project)
+	marshal, err := project.MarshalYAML()
 	assert.NilError(t, err)
-	assert.DeepEqual(t, expected, string(marshal))
-}
-
-func TestNormalizeResolvePathsBuildContextPaths(t *testing.T) {
-	wd, _ := os.Getwd()
-	project := types.Project{
-		Name:       "myProject",
-		WorkingDir: wd,
-		Services: []types.ServiceConfig{
-			{
-				Name: "foo",
-				Build: &types.BuildConfig{
-					Context:    "./testdata",
-					Dockerfile: "Dockerfile-sample",
-				},
-				Scale: 1,
-			},
-		},
-	}
-
-	expected := fmt.Sprintf(`name: myProject
-services:
-  foo:
-    build:
-      context: %s
-      dockerfile: Dockerfile-sample
-    networks:
-      default: null
-networks:
-  default:
-    name: myProject_default
-`, filepath.Join(wd, "testdata"))
-	err := normalize(&project, true)
-	assert.NilError(t, err)
-	marshal, err := yaml.Marshal(project)
-	assert.NilError(t, err)
-	assert.DeepEqual(t, expected, string(marshal))
-}
-
-func TestNormalizeAbsolutePaths(t *testing.T) {
-	project := types.Project{
-		Name:         "myProject",
-		WorkingDir:   "testdata",
-		Networks:     types.Networks{},
-		ComposeFiles: []string{filepath.Join("testdata", "simple", "compose.yaml"), filepath.Join("testdata", "simple", "compose-with-overrides.yaml")},
-	}
-	absWorkingDir, _ := filepath.Abs("testdata")
-	absComposeFile, _ := filepath.Abs(filepath.Join("testdata", "simple", "compose.yaml"))
-	absOverrideFile, _ := filepath.Abs(filepath.Join("testdata", "simple", "compose-with-overrides.yaml"))
-
-	expected := types.Project{
-		Name:         "myProject",
-		Networks:     types.Networks{"default": {Name: "myProject_default"}},
-		WorkingDir:   absWorkingDir,
-		ComposeFiles: []string{absComposeFile, absOverrideFile},
-	}
-	err := normalize(&project, false)
-	assert.NilError(t, err)
-	assert.DeepEqual(t, expected, project)
+	assert.Equal(t, expected, string(marshal))
 }
 
 func TestNormalizeVolumes(t *testing.T) {
@@ -163,7 +102,6 @@ func TestNormalizeVolumes(t *testing.T) {
 		},
 	}
 
-	absCwd, _ := filepath.Abs(".")
 	expected := types.Project{
 		Name:     "myProject",
 		Networks: types.Networks{"default": {Name: "myProject_default"}},
@@ -177,10 +115,121 @@ func TestNormalizeVolumes(t *testing.T) {
 				Name: "CustomName",
 			},
 		},
-		WorkingDir:   absCwd,
-		ComposeFiles: []string{},
 	}
-	err := normalize(&project, false)
+	err := Normalize(&project)
 	assert.NilError(t, err)
 	assert.DeepEqual(t, expected, project)
+}
+
+func TestNormalizeDependsOn(t *testing.T) {
+	project := types.Project{
+		Name:     "myProject",
+		Networks: types.Networks{},
+		Volumes:  types.Volumes{},
+		Services: []types.ServiceConfig{
+			{
+				Name: "foo",
+				DependsOn: map[string]types.ServiceDependency{
+					"bar": { // explicit depends_on never should be overridden
+						Condition: types.ServiceConditionHealthy,
+						Restart:   false,
+						Required:  true,
+					},
+				},
+				NetworkMode: "service:zot",
+			},
+			{
+				Name: "bar",
+				VolumesFrom: []string{
+					"zot",
+					"container:xxx",
+				},
+			},
+			{
+				Name: "zot",
+			},
+		},
+	}
+
+	expected := `name: myProject
+services:
+  bar:
+    depends_on:
+      zot:
+        condition: service_started
+        required: true
+    networks:
+      default: null
+    volumes_from:
+      - zot
+      - container:xxx
+  foo:
+    depends_on:
+      bar:
+        condition: service_healthy
+        required: true
+      zot:
+        condition: service_started
+        restart: true
+        required: true
+    network_mode: service:zot
+  zot:
+    networks:
+      default: null
+networks:
+  default:
+    name: myProject_default
+`
+	err := Normalize(&project)
+	assert.NilError(t, err)
+	marshal, err := project.MarshalYAML()
+	assert.NilError(t, err)
+	assert.Equal(t, expected, string(marshal))
+}
+
+func TestNormalizeImplicitDependencies(t *testing.T) {
+	project := types.Project{
+		Name: "myProject",
+		Services: types.Services{
+			types.ServiceConfig{
+				Name:        "test",
+				Ipc:         "service:foo",
+				Cgroup:      "service:bar",
+				Uts:         "service:baz",
+				Pid:         "service:qux",
+				VolumesFrom: []string{"quux"},
+				Links:       []string{"corge"},
+				DependsOn: map[string]types.ServiceDependency{
+					// explicit dependency MUST not be overridden
+					"foo": {Condition: types.ServiceConditionHealthy, Restart: false, Required: true},
+				},
+			},
+		},
+	}
+
+	expected := types.DependsOnConfig{
+		"foo":   {Condition: types.ServiceConditionHealthy, Restart: false, Required: true},
+		"bar":   {Condition: types.ServiceConditionStarted, Restart: true, Required: true},
+		"baz":   {Condition: types.ServiceConditionStarted, Restart: true, Required: true},
+		"qux":   {Condition: types.ServiceConditionStarted, Restart: true, Required: true},
+		"quux":  {Condition: types.ServiceConditionStarted, Required: true},
+		"corge": {Condition: types.ServiceConditionStarted, Restart: true, Required: true},
+	}
+	err := Normalize(&project)
+	assert.NilError(t, err)
+	assert.DeepEqual(t, expected, project.Services[0].DependsOn)
+}
+
+func TestImplicitContextPath(t *testing.T) {
+	project := &types.Project{
+		Name: "myProject",
+		Services: types.Services{
+			types.ServiceConfig{
+				Name:  "test",
+				Build: &types.BuildConfig{},
+			},
+		},
+	}
+	assert.NilError(t, Normalize(project))
+	assert.Equal(t, ".", project.Services[0].Build.Context)
 }

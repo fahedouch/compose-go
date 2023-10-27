@@ -2,19 +2,26 @@ package dotenv
 
 import (
 	"bytes"
-	"fmt"
 	"os"
-	"reflect"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
+	"gotest.tools/v3/assert"
 )
 
 var noopPresets = make(map[string]string)
 
 func parseAndCompare(t *testing.T, rawEnvLine string, expectedKey string, expectedValue string) {
-	key, value, _ := parseLine(rawEnvLine, noopPresets)
-	if key != expectedKey || value != expectedValue {
-		t.Errorf("Expected '%v' to parse as '%v' => '%v', got '%v' => '%v' instead", rawEnvLine, expectedKey, expectedValue, key, value)
+	t.Helper()
+	env, err := Parse(strings.NewReader(rawEnvLine))
+	assert.NilError(t, err)
+	actualValue, ok := env[expectedKey]
+	if !ok {
+		t.Errorf("Key %q was not found in env: %v", expectedKey, env)
+	} else if actualValue != expectedValue {
+		t.Errorf("Expected '%v' to parse as '%v' => '%v', got '%v' => '%v' instead", rawEnvLine, expectedKey, expectedValue, expectedKey, actualValue)
 	}
 }
 
@@ -47,25 +54,10 @@ func TestLoadWithNoArgsLoadsDotEnv(t *testing.T) {
 	}
 }
 
-func TestOverloadWithNoArgsOverloadsDotEnv(t *testing.T) {
-	err := Overload()
-	pathError := err.(*os.PathError)
-	if pathError == nil || pathError.Op != "open" || pathError.Path != ".env" {
-		t.Errorf("Didn't try and open .env by default")
-	}
-}
-
 func TestLoadFileNotFound(t *testing.T) {
 	err := Load("somefilethatwillneverexistever.env")
 	if err == nil {
 		t.Error("File wasn't found but Load didn't return an error")
-	}
-}
-
-func TestOverloadFileNotFound(t *testing.T) {
-	err := Overload("somefilethatwillneverexistever.env")
-	if err == nil {
-		t.Error("File wasn't found but Overload didn't return an error")
 	}
 }
 
@@ -129,20 +121,6 @@ func TestLoadDoesNotOverride(t *testing.T) {
 		"OPTION_B": "",
 	}
 	loadEnvAndCompareValues(t, Load, envFileName, expectedValues, presets)
-}
-
-func TestOveroadDoesOverride(t *testing.T) {
-	envFileName := "fixtures/plain.env"
-
-	// ensure NO overload
-	presets := map[string]string{
-		"OPTION_A": "do_not_override",
-	}
-
-	expectedValues := map[string]string{
-		"OPTION_A": "1",
-	}
-	loadEnvAndCompareValues(t, Overload, envFileName, expectedValues, presets)
 }
 
 func TestLoadPlainEnv(t *testing.T) {
@@ -218,7 +196,7 @@ func TestSubstitutions(t *testing.T) {
 		"OPTION_A": "1",
 		"OPTION_B": "1",
 		"OPTION_C": "1",
-		"OPTION_D": "11",
+		"OPTION_D": "1_1",
 		"OPTION_E": "",
 	}
 
@@ -257,17 +235,17 @@ func TestExpanding(t *testing.T) {
 			map[string]string{"BAR": "quote $FOO"},
 		},
 		{
-			"does not expand escaped variables",
+			"does not expand escaped variables 1",
 			`FOO="foo\$BAR"`,
 			map[string]string{"FOO": "foo$BAR"},
 		},
 		{
-			"does not expand escaped variables",
+			"does not expand escaped variables 2",
 			`FOO="foo\${BAR}"`,
 			map[string]string{"FOO": "foo${BAR}"},
 		},
 		{
-			"does not expand escaped variables",
+			"does not expand escaped variables 3",
 			"FOO=test\nBAR=\"foo\\${FOO} ${FOO}\"",
 			map[string]string{"FOO": "test", "BAR": "foo${FOO} test"},
 		},
@@ -343,6 +321,7 @@ func TestParsing(t *testing.T) {
 
 	// parses escaped double quotes
 	parseAndCompare(t, `FOO="escaped\"bar"`, "FOO", `escaped"bar`)
+	parseAndCompare(t, `FOO="\"quoted\""`, "FOO", `"quoted"`)
 
 	// parses single quotes inside double quotes
 	parseAndCompare(t, `FOO="'d'"`, "FOO", `'d'`)
@@ -366,16 +345,23 @@ func TestParsing(t *testing.T) {
 	parseAndCompare(t, "export\tOPTION_A=2", "OPTION_A", "2")
 	parseAndCompare(t, "  export OPTION_A=2", "OPTION_A", "2")
 	parseAndCompare(t, "\texport OPTION_A=2", "OPTION_A", "2")
+	parseAndCompare(t, `export OPTION_A="export A"`, "OPTION_A", "export A")
 
 	// it 'expands newlines in quoted strings' do
 	// expect(env('FOO="bar\nbaz"')).to eql('FOO' => "bar\nbaz")
 	parseAndCompare(t, `FOO="bar\nbaz"`, "FOO", "bar\nbaz")
+	parseAndCompare(t, `FOO=a\tb`, "FOO", `a\tb`)
+	parseAndCompare(t, `FOO="a\tb"`, "FOO", "a\tb")
 
-	// it 'parses varibales with "." in the name' do
+	// various shell escape sequences
+	// see https://pubs.opengroup.org/onlinepubs/9699919799/utilities/echo.html
+	parseAndCompare(t, `KEY="Z\aZ\bZ\fZ\nZ\rZ\tZ\vZ\\Z\0123Z"`, "KEY", "Z\aZ\bZ\fZ\nZ\rZ\tZ\vZ\\ZSZ")
+
+	// it 'parses variables with "." in the name' do
 	// expect(env('FOO.BAR=foobar')).to eql('FOO.BAR' => 'foobar')
 	parseAndCompare(t, "FOO.BAR=foobar", "FOO.BAR", "foobar")
 
-	// it 'parses varibales with several "=" in the value' do
+	// it 'parses variables with several "=" in the value' do
 	// expect(env('FOO=foobar=')).to eql('FOO' => 'foobar=')
 	parseAndCompare(t, "FOO=foobar=", "FOO", "foobar=")
 
@@ -386,9 +372,14 @@ func TestParsing(t *testing.T) {
 	// it 'ignores inline comments' do
 	// expect(env("foo=bar # this is foo")).to eql('foo' => 'bar')
 	parseAndCompare(t, "FOO=bar # this is foo", "FOO", "bar")
+	parseAndCompare(t, "FOO=bar #this is foo", "FOO", "bar")
+	parseAndCompare(t, "FOO=bar #", "FOO", "bar")
+	parseAndCompare(t, "FOO=123#not-an-inline-comment", "FOO", "123#not-an-inline-comment")
 
 	// it 'allows # in quoted value' do
 	// expect(env('foo="bar#baz" # comment')).to eql('foo' => 'bar#baz')
+	parseAndCompare(t, `FOO="bar#baz"`, "FOO", "bar#baz")
+	parseAndCompare(t, `FOO="bar#baz"#`, "FOO", "bar#baz")
 	parseAndCompare(t, `FOO="bar#baz" # comment`, "FOO", "bar#baz")
 	parseAndCompare(t, "FOO='bar#baz' # comment", "FOO", "bar#baz")
 	parseAndCompare(t, `FOO="bar#baz#bang" # comment`, "FOO", "bar#baz#bang")
@@ -400,25 +391,49 @@ func TestParsing(t *testing.T) {
 	parseAndCompare(t, "FOO='ba#r'", "FOO", "ba#r")
 
 	// newlines and backslashes should be escaped
-	parseAndCompare(t, `FOO="bar\n\ b\az"`, "FOO", "bar\n baz")
-	parseAndCompare(t, `FOO="bar\\\n\ b\az"`, "FOO", "bar\\\n baz")
-	parseAndCompare(t, `FOO="bar\\r\ b\az"`, "FOO", "bar\\r baz")
+	parseAndCompare(t, `FOO="bar\n\ b\az"`, "FOO", "bar\n\\ b\az")
+	parseAndCompare(t, `FOO="bar\\\n\ b\az"`, "FOO", "bar\\\n\\ b\az")
+	parseAndCompare(t, `FOO="bar\\r\ b\az"`, "FOO", "bar\\r\\ b\az")
+	parseAndCompare(t, `FOO="bar\nbaz\\"`, "FOO", "bar\nbaz\\")
 
 	parseAndCompare(t, `="value"`, "", "value")
-	parseAndCompare(t, `KEY="`, "KEY", "\"")
-	parseAndCompare(t, `KEY="value`, "KEY", "\"value")
 
 	// leading whitespace should be ignored
 	parseAndCompare(t, " KEY =value", "KEY", "value")
 	parseAndCompare(t, "   KEY=value", "KEY", "value")
 	parseAndCompare(t, "\tKEY=value", "KEY", "value")
 
+	// XSI-echo style octal escapes are expanded
+	parseAndCompare(t, `KEY="\0123"`, "KEY", "S")
+
+	// non-XSI/POSIX escapes are ignored
+	parseAndCompare(t, `KEY="\x07"`, "KEY", `\x07`)
+	parseAndCompare(t, `KEY="\u12e4"`, "KEY", `\u12e4`)
+	parseAndCompare(t, `KEY="\U00101234"`, "KEY", `\U00101234`)
+
 	// it 'throws an error if line format is incorrect' do
 	// expect{env('lol$wut')}.to raise_error(Dotenv::FormatError)
 	badlyFormattedLine := "lol$wut"
-	_, _, err := parseLine(badlyFormattedLine, noopPresets)
+	_, err := Parse(strings.NewReader(badlyFormattedLine))
 	if err == nil {
 		t.Errorf("Expected \"%v\" to return error, but it didn't", badlyFormattedLine)
+	}
+}
+
+func TestUnterminatedQuotes(t *testing.T) {
+	cases := []string{
+		`KEY="`,
+		`KEY="value`,
+		`KEY="value\"`,
+		`KEY="value'`,
+		`KEY='`,
+		`KEY='value`,
+		`KEY='value\'`,
+		`KEY='value"`,
+	}
+	for _, tc := range cases {
+		_, err := Parse(strings.NewReader(tc))
+		assert.ErrorContains(t, err, "unterminated quoted value", "Env data: %v", tc)
 	}
 }
 
@@ -450,7 +465,7 @@ func TestLinesToIgnore(t *testing.T) {
 
 	for n, c := range cases {
 		t.Run(n, func(t *testing.T) {
-			got := string(getStatementStart([]byte(c.input)))
+			got := string(newParser().getStatementStart(c.input))
 			if got != c.want {
 				t.Errorf("Expected:\t %q\nGot:\t %q", c.want, got)
 			}
@@ -469,62 +484,11 @@ func TestErrorReadDirectory(t *testing.T) {
 
 func TestErrorParsing(t *testing.T) {
 	envFileName := "fixtures/invalid1.env"
-	envMap, err := Read(envFileName)
-	if err == nil {
-		t.Errorf("Expected error, got %v", envMap)
-	}
+	_, err := Read(envFileName)
+	assert.ErrorContains(t, err, "line 7: key cannot contain a space")
 }
 
-func TestWrite(t *testing.T) {
-	writeAndCompare := func(env string, expected string) {
-		envMap, _ := Unmarshal(env)
-		actual, _ := Marshal(envMap)
-		if expected != actual {
-			t.Errorf("Expected '%v' (%v) to write as '%v', got '%v' instead.", env, envMap, expected, actual)
-		}
-	}
-	// just test some single lines to show the general idea
-	// TestRoundtrip makes most of the good assertions
-
-	// values are always double-quoted
-	writeAndCompare(`key=value`, `key="value"`)
-	// double-quotes are escaped
-	writeAndCompare(`key=va"lu"e`, `key="va\"lu\"e"`)
-	// but single quotes are left alone
-	writeAndCompare(`key=va'lu'e`, `key="va'lu'e"`)
-	// newlines, backslashes, and some other special chars are escaped
-	writeAndCompare(`foo="\n\r\\r!"`, `foo="\n\r\\r\!"`)
-	// lines should be sorted
-	writeAndCompare("foo=bar\nbaz=buzz", "baz=\"buzz\"\nfoo=\"bar\"")
-	// integers should not be quoted
-	writeAndCompare(`key="10"`, `key=10`)
-
-}
-
-func TestRoundtrip(t *testing.T) {
-	fixtures := []string{"equals.env", "exported.env", "plain.env", "quoted.env"}
-	for _, fixture := range fixtures {
-		fixtureFilename := fmt.Sprintf("fixtures/%s", fixture)
-		env, err := readFile(fixtureFilename, nil)
-		if err != nil {
-			t.Errorf("Expected '%s' to read without error (%v)", fixtureFilename, err)
-		}
-		rep, err := Marshal(env)
-		if err != nil {
-			t.Errorf("Expected '%s' to Marshal (%v)", fixtureFilename, err)
-		}
-		roundtripped, err := Unmarshal(rep)
-		if err != nil {
-			t.Errorf("Expected '%s' to Mashal and Unmarshal (%v)", fixtureFilename, err)
-		}
-		if !reflect.DeepEqual(env, roundtripped) {
-			t.Errorf("Expected '%s' to roundtrip as '%v', got '%v' instead", fixtureFilename, env, roundtripped)
-		}
-
-	}
-}
-
-func TestInheritedEnvVariablSameSize(t *testing.T) {
+func TestInheritedEnvVariableSameSize(t *testing.T) {
 	const envKey = "VAR_TO_BE_LOADED_FROM_OS_ENV"
 	const envVal = "SOME_RANDOM_VALUE"
 	os.Setenv(envKey, envVal)
@@ -550,7 +514,7 @@ func TestInheritedEnvVariablSameSize(t *testing.T) {
 	}
 }
 
-func TestInheritedEnvVariablSingleVar(t *testing.T) {
+func TestInheritedEnvVariableSingleVar(t *testing.T) {
 	const envKey = "VAR_TO_BE_LOADED_FROM_OS_ENV"
 	const envVal = "SOME_RANDOM_VALUE"
 	os.Setenv(envKey, envVal)
@@ -599,16 +563,148 @@ func TestInheritedEnvVariableNotFoundWithLookup(t *testing.T) {
 	}
 }
 
-func TestExpendingEnvironmentWithLookup(t *testing.T) {
+func TestExpandingEnvironmentWithLookup(t *testing.T) {
 	rawEnvLine := "TEST=$ME"
 	expectedValue := "YES"
-	key, value, _ := parseLineWithLookup(rawEnvLine, noopPresets, func(s string) (string, bool) {
+	lookupFn := func(s string) (string, bool) {
 		if s == "ME" {
 			return expectedValue, true
 		}
 		return "NO", false
-	})
-	if value != "YES" {
-		t.Errorf("Expected '%v' to parse as '%v' => '%v', got '%v' => '%v' instead", rawEnvLine, key, expectedValue, key, value)
 	}
+	env, err := ParseWithLookup(strings.NewReader(rawEnvLine), lookupFn)
+	require.NoError(t, err)
+	require.Equal(t, expectedValue, env["TEST"])
+}
+
+func TestSubstitutionsWithEnvFilePrecedence(t *testing.T) {
+	os.Clearenv()
+	const envKey = "OPTION_A"
+	const envVal = "5"
+	os.Setenv(envKey, envVal)
+	defer os.Unsetenv(envKey)
+
+	envFileName := "fixtures/substitutions.env"
+	expectedValues := map[string]string{
+		"OPTION_A": "1",
+		"OPTION_B": "5",
+		"OPTION_C": "5",
+		"OPTION_D": "5_5",
+		"OPTION_E": "",
+	}
+
+	envMap, err := ReadWithLookup(os.LookupEnv, envFileName)
+	if err != nil {
+		t.Error("Error reading file")
+	}
+	if len(envMap) != len(expectedValues) {
+		t.Error("Didn't get the right size map back")
+	}
+
+	for key, value := range expectedValues {
+		if envMap[key] != value {
+			t.Errorf("Read got one of the keys wrong, [%q]->%q", key, envMap[key])
+		}
+	}
+}
+
+func TestSubstitutionsWithEnvFileDefaultValuePrecedence(t *testing.T) {
+	os.Clearenv()
+	const envKey = "OPTION_A"
+	const envVal = "5"
+	os.Setenv(envKey, envVal)
+	defer os.Unsetenv(envKey)
+
+	envFileName := "fixtures/substitutions-default.env"
+	expectedValues := map[string]string{
+		"OPTION_A": "5",
+		"OPTION_B": "5",
+		"OPTION_C": "5",
+		"OPTION_D": "5_5",
+		"OPTION_E": "",
+	}
+
+	envMap, err := ReadWithLookup(os.LookupEnv, envFileName)
+	if err != nil {
+		t.Error("Error reading file")
+	}
+	if len(envMap) != len(expectedValues) {
+		t.Error("Didn't get the right size map back")
+	}
+
+	for key, value := range expectedValues {
+		if envMap[key] != value {
+			t.Errorf("Read got one of the keys wrong, [%q]->%q", key, envMap[key])
+		}
+	}
+}
+
+func TestSubstitutionsWithUnsetVarEnvFileDefaultValuePrecedence(t *testing.T) {
+	os.Clearenv()
+
+	envFileName := "fixtures/substitutions-default.env"
+	expectedValues := map[string]string{
+		"OPTION_A": "1",
+		"OPTION_B": "1",
+		"OPTION_C": "1",
+		"OPTION_D": "1_1",
+		"OPTION_E": "",
+	}
+
+	envMap, err := ReadWithLookup(os.LookupEnv, envFileName)
+	if err != nil {
+		t.Error("Error reading file")
+	}
+	if len(envMap) != len(expectedValues) {
+		t.Error("Didn't get the right size map back")
+	}
+
+	for key, value := range expectedValues {
+		if envMap[key] != value {
+			t.Errorf("Read got one of the keys wrong, [%q]->%q", key, envMap[key])
+		}
+	}
+}
+
+func TestUTF8BOM(t *testing.T) {
+	envFileName := "fixtures/utf8-bom.env"
+
+	// sanity check the fixture, since the UTF-8 BOM is invisible, it'd be
+	// easy for it to get removed by accident, which would invalidate this
+	// test
+	envFileData, err := os.ReadFile(envFileName)
+	require.NoError(t, err)
+	require.True(t, bytes.HasPrefix(envFileData, []byte("\uFEFF")),
+		"Test fixture file is missing UTF-8 BOM")
+
+	expectedValues := map[string]string{
+		"OPTION_A": "1",
+		"OPTION_B": "2",
+		"OPTION_C": "3",
+		"OPTION_D": "4",
+		"OPTION_E": "5",
+	}
+
+	loadEnvAndCompareValues(t, Load, envFileName, expectedValues, noopPresets)
+}
+
+func TestDash(t *testing.T) {
+	loadEnvAndCompareValues(t, Load, "fixtures/special.env", map[string]string{
+		"VAR-WITH-DASHES":      "dashes",
+		"VAR.WITH.DOTS":        "dots",
+		"VAR_WITH_UNDERSCORES": "underscores",
+	}, noopPresets)
+}
+
+func TestGetEnvFromFile(t *testing.T) {
+	wd := t.TempDir()
+	f := filepath.Join(wd, ".env")
+	err := os.Mkdir(f, 0o700)
+	assert.NilError(t, err)
+
+	_, err = GetEnvFromFile(nil, wd, nil)
+	assert.NilError(t, err)
+
+	_, err = GetEnvFromFile(nil, wd, []string{f})
+	assert.Check(t, strings.HasSuffix(err.Error(), ".env is a directory"))
 }
